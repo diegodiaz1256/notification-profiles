@@ -1101,13 +1101,31 @@ Panel {
                 anchors.top: parent.top
                 anchors.topMargin: Style.space(6)
                 anchors.leftMargin: Style.space(6)
-                anchors.right: forgetAppBg.left
+                anchors.right: appMuteLabel.left
                 anchors.rightMargin: Style.space(8)
                 text: seenAppRow.modelData
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 elide: Text.ElideRight
+              }
+
+              // A bare switch here doesn't say which way is which — "on"
+              // could as easily read as "notifications on" as "muted on".
+              // The word next to it removes the ambiguity and updates live
+              // with the switch. Placed before (left of) the forget-× so the
+              // name/label/switch reads as one line and forget stays a
+              // clearly separate, secondary action past it.
+              Text {
+                id: appMuteLabel
+                anchors.right: forgetAppBg.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: appSwitch.verticalCenter
+                textFormat: Text.PlainText
+                text: root.draftMuted(seenAppRow.modelData) ? "Muted" : "Allowed"
+                color: root.draftMuted(seenAppRow.modelData) ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
 
               // Untracks the app entirely (also ages out after 30 days on
@@ -1664,7 +1682,7 @@ Panel {
                     textFormat: Text.PlainText
                     anchors.left: appIconImage.visible ? appIconBg.right : parent.left
                     anchors.leftMargin: appIconImage.visible ? Style.space(8) : 0
-                    anchors.right: timeText.left
+                    anchors.right: silencedBadge.visible ? silencedBadge.left : timeText.left
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: historyRow.modelData.app || "Unknown"
@@ -1673,6 +1691,31 @@ Panel {
                     font.pixelSize: Style.font.body
                     font.bold: true
                     elide: Text.ElideRight
+                  }
+
+                  // Marks an entry that never actually showed as a toast —
+                  // silenced by a profile's mute list, dndAll, global DND,
+                  // or an unmuted first-time sender under a block. Everything
+                  // else on this row reached the screen and was dismissed or
+                  // expired normally.
+                  Text {
+                    id: silencedBadge
+                    textFormat: Text.PlainText
+                    visible: !!historyRow.modelData.silenced
+                    anchors.right: timeText.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰂛"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+
+                    HoverHandler { id: silencedBadgeHover }
+                    PanelToolTip {
+                      visible: silencedBadgeHover.hovered
+                      text: "Silenced — this notification never showed as a toast"
+                      fontFamily: root.fontFamily
+                    }
                   }
 
                   Text {

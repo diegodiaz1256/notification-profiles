@@ -470,13 +470,21 @@ Item {
     // captured for the popup card.
     notification.tracked = true
     var snapshot = snapshotOf(notification)
+    // Every check below tracks/matches/silences by this resolved name, the
+    // same one snapshot.app already carries (see
+    // NotificationLogic.effectiveAppName) — reading notification.appName
+    // directly here instead would silence-by-rule against a different name
+    // than the one shown in history and offered in the app list, so a mute
+    // rule set from the tracked-apps screen could silently never match.
+    var appName = snapshot.app
+
     // Resolved once, now, against the profile active at arrival — carried
     // on the row from here rather than re-evaluated on every render, so a
     // toast that outlives a profile switch (or a shell restart) keeps
     // answering to the profile that was active when it actually arrived.
     // See NotificationLogic.isAppImportant.
     snapshot.important = NotificationLogic.isAppImportant(
-      service.activeProfile, notification.appName, service.importantApps)
+      service.activeProfile, appName, service.importantApps)
     liveRefs[snapshot.originalId] = notification
     // Guard the delete: a newer notification may have reused this originalId
     // (freedesktop replaces_id) and taken over the map slot.
@@ -495,8 +503,8 @@ Item {
       ? service.activeProfile.allowUnknownApps
       : true
     var wasUnknownApp = !effectiveAllowUnknown &&
-      NotificationLogic.findSeenApp(service.seenApps, notification.appName) === null
-    service.recordSeenApp(notification.appName)
+      NotificationLogic.findSeenApp(service.seenApps, appName) === null
+    service.recordSeenApp(appName)
 
     // A first-time sender blocked by allowUnknownApps isn't silenced just
     // this once — it's muted in the active profile going forward, the same
@@ -505,15 +513,14 @@ Item {
     // (recordSeenApp just added it) and let it straight through, which is
     // not what "block apps I haven't approved" means.
     if (wasUnknownApp) {
-      service.setAppMuted(service.activeProfileName, notification.appName, true)
+      service.setAppMuted(service.activeProfileName, appName, true)
     }
 
     // The active profile silences this sender, or silences everything. Same
     // treatment as DND from here on — a silenced notification still earns its
     // history entry — and the same bypass, so a profile can't swallow the
     // critical CLI alerts DND already lets through.
-    var profileSilenced = NotificationLogic.profileSilences(service.activeProfile,
-                                                            notification.appName)
+    var profileSilenced = NotificationLogic.profileSilences(service.activeProfile, appName)
 
     // DND bypass rules: chat apps abuse urgency=critical to force
     // visibility, so critical alone isn't enough — we also require the
@@ -522,7 +529,11 @@ Item {
       // The toast never shows, so the only record a silenced notification
       // can leave is a history entry. Write it straight into history —
       // "what did I miss while silenced" is exactly what history is for.
+      // Marked so the history list itself can tell the two apart: an entry
+      // that was actually shown and expired/dismissed normally, versus one
+      // that never made it to the screen at all.
       if (!isEphemeral(notification)) {
+        snapshot.silenced = true
         writeSilenced(notification, snapshot)
         return
       }
@@ -555,6 +566,11 @@ Item {
       var updated = null
       try {
         updated = NotificationLogic.replacementSnapshot(notification, written.originalId, written.timestamp)
+        // replacementSnapshot builds a fresh snapshot via snapshotOf, which
+        // knows nothing about silencing — carry the flag forward so a
+        // catch-up write triggered by a client update in place doesn't
+        // silently drop it.
+        if (updated) updated.silenced = true
       } catch (e) {
         // Torn down by the server while the write was queued.
       }

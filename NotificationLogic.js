@@ -197,6 +197,35 @@ function shouldRenderCompactGlyph(glyph, iconSource, singleLineToast) {
   return String(glyph || "").length > 0 && String(iconSource || "").length === 0 && !!singleLineToast
 }
 
+// What "app" a notification is tracked/matched/displayed under. Plain
+// app_name almost always is it — but a Chromium browser running a site as
+// its own window (`--app=<url>`, which is how the installed-webapp launcher
+// opens things like WhatsApp) still reports the browser's own app_name
+// ("Brave"/"Brave Origin") over D-Bus, making every such site indistinguishable
+// from a regular tab. Chromium is expected to set the freedesktop
+// `desktop-entry` hint to the launching site's own identity in that mode,
+// which Quickshell exposes as notification.desktopEntry — distinct from
+// appName. When present and not just a restatement of the generic app name,
+// prefer it.
+//
+// Verified structurally (a raw D-Bus call with both fields set threads
+// through end to end); NOT verified against a real Brave/Chromium webapp
+// notification, since that can only be confirmed by the user triggering one
+// on their machine — what Brave actually populates here in practice may
+// need a follow-up tweak once that's known.
+function effectiveAppName(appName, desktopEntry) {
+  var app = String(appName || "").trim()
+  var entry = String(desktopEntry || "").trim()
+  if (!entry) return app
+  if (!app) return entry
+  // A desktop-entry that's just the app name again (case aside) or a
+  // substring/superset of it isn't distinguishing anything — most
+  // non-webapp Chromium tabs, and any sender that simply echoes its own
+  // identity into both fields, fall here and should keep using appName.
+  if (entry.toLowerCase() === app.toLowerCase()) return app
+  return entry
+}
+
 function snapshotOf(notification, timestamp) {
   var n = notification || {}
   var id = n.id || 0
@@ -205,7 +234,7 @@ function snapshotOf(notification, timestamp) {
   return {
     id: id,
     originalId: id,
-    app: n.appName || "",
+    app: effectiveAppName(n.appName, n.desktopEntry),
     appIcon: n.appIcon || "",
     summary: String(n.summary || ""),
     body: n.body || "",
@@ -271,7 +300,12 @@ function historyEntry(value, normalUrgency) {
     // `required`, and a required property needs the model role to exist on
     // every row or the delegate fails to instantiate, not just the ones
     // that came through popupEntry.
-    important: !!e.important
+    important: !!e.important,
+    // True only for a row that arrived via writeSilenced — muted by a
+    // profile, dndAll, global DND, or an unmuted first-time sender under a
+    // block. Absent (falsy) means it was actually shown as a toast and
+    // later expired or was dismissed normally.
+    silenced: !!e.silenced
   }
 }
 
