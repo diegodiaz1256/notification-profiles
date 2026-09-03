@@ -92,8 +92,26 @@ Item {
   property var profiles: NotificationLogic.defaultProfiles()
   property string activeProfileName: "Normal"
   // Every app_name that has sent a notification, so the config panel can list
-  // real senders instead of asking the user to spell them from memory.
+  // real senders instead of asking the user to spell them from memory. Each
+  // entry carries when it was last seen, so an app that stops notifying
+  // ages out (see seenAppsMaxAgeMs) instead of accumulating forever — a
+  // machine that runs test scripts or one-off senders would otherwise grow
+  // this list without bound between manual prunes.
   property var seenApps: []
+  readonly property var seenAppNames: seenApps.map(function(e) { return e.name })
+
+  // When false, an app that has never been seen before is silenced by
+  // default (still recorded and lands in history, same treatment a muted
+  // app gets) until the user opts it in — the reverse of the normal
+  // per-profile model, which only ever mutes apps you already know about.
+  // True (the default) keeps today's behavior: anything gets through unless
+  // a profile says otherwise.
+  property bool allowUnknownApps: true
+
+  function setAllowUnknownApps(value) {
+    service.allowUnknownApps = !!value
+    service.scheduleSettingsSave()
+  }
 
   readonly property var activeProfile: NotificationLogic.resolveActiveProfile(profiles, activeProfileName)
 
@@ -111,16 +129,103 @@ Item {
     return service.activeProfileName
   }
 
+  // The one profile that can't be deleted, only edited — a machine with
+  // profiles always needs at least one, and picking a fixed name for it
+  // (rather than e.g. "whichever is first") means the guard survives
+  // reordering and doesn't depend on list position.
+  readonly property string defaultProfileName: "Normal"
+
   // Replaces the whole profile list in one write — the config panel edits a
   // copy and hands the result back, so partial-update races between the panel
   // and the daemon can't leave a half-applied rule set behind.
   function setProfiles(list) {
-    service.profiles = NotificationLogic.sanitizeProfiles(list)
+    var incoming = NotificationLogic.sanitizeProfiles(list)
+    // The panel is where deletion is invoked, but the daemon is authoritative
+    // per this file's role — a list missing the protected profile (deleted
+    // client-side despite the panel's own guard, or sent by some other
+    // caller entirely) gets it re-added rather than silently losing it.
+    if (!NotificationLogic.findProfile(incoming, service.defaultProfileName)) {
+      var restored = NotificationLogic.findProfile(service.profiles, service.defaultProfileName)
+      incoming = incoming.concat([restored || {
+        name: service.defaultProfileName, icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null
+      }])
+    }
+
+    // Menu resync is keyed on what the menu actually shows: profile names
+    // and icons. A rule-only edit (muteApps/dndAll/allowUnknownApps) changes
+    // nothing the menu displays, so comparing sorted "name|icon" pairs before
+    // and after is enough to decide whether a rewrite is warranted — this is
+    // computed before service.profiles is reassigned, against the state that
+    // was live until now.
+    var menuRelevantChange = !NotificationLogic.sameProfileIdentities(service.profiles, incoming)
+
+    service.profiles = incoming
     if (!NotificationLogic.findProfile(service.profiles, service.activeProfileName)) {
       service.activeProfileName = service.profiles.length ? service.profiles[0].name : ""
     }
     service.scheduleSettingsSave()
+    if (menuRelevantChange) service.syncProfilesMenu()
   }
+
+  // ---------------------------------------------------- Super+Space menu sync
+  //
+  // Keeps a "Profiles" submenu in the Omarchy launcher in step with the
+  // current profile list. Profile names are user data, so the menu can't be
+  // a static file — this rewrites one marked region of the user's own
+  // ~/.config/omarchy/extensions/omarchy-menu.jsonc, leaving everything else
+  // in that file untouched. The menu watches that file (watchChanges: true)
+  // and reloads on change, so this takes effect without a shell restart.
+  //
+  // Called only when setProfiles sees the set of names or icons actually
+  // change — a pure rule edit (mute list, dndAll, allowUnknownApps) changes
+  // nothing the menu renders and would just be a needless rewrite.
+  readonly property string menuExtensionsPath: home + "/.config/omarchy/extensions/omarchy-menu.jsonc"
+  readonly property string menuMarkerStart: "  // >>> zeroge.notification-profiles: managed, do not edit <<<"
+  readonly property string menuMarkerEnd: "  // <<< zeroge.notification-profiles <<<"
+
+  // A profile name becomes a menu id segment: lowercased, non-alphanumeric
+  // collapsed to "-", trimmed. Two names that collide after that (e.g. "Work!"
+  // and "Work?") get a numeric suffix so every row still gets its own id.
+  function menuIdFor(name, used) {
+    var base = String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    if (!base) base = "profile"
+    var id = base
+    var n = 2
+    while (used[id]) { id = base + "-" + n; n++ }
+    used[id] = true
+    return id
+  }
+
+  function syncProfilesMenu() {
+    readMenuFileProc.running = true
+  }
+
+  Process {
+    id: readMenuFileProc
+    command: ["bash", "-c", "cat \"$1\" 2>/dev/null || true", "--", service.menuExtensionsPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: service.writeProfilesMenuBlock(this.text)
+    }
+  }
+
+  function writeProfilesMenuBlock(existingRaw) {
+    var block = NotificationLogic.profilesMenuBlock(
+      service.profiles, service.menuMarkerStart, service.menuMarkerEnd, service.menuIdFor)
+    var merged = NotificationLogic.spliceMenuBlock(
+      existingRaw, block, service.menuMarkerStart, service.menuMarkerEnd)
+    if (merged === null) return // malformed existing file — leave it alone rather than guess
+
+    // Atomic write: a temp file in the same directory, then rename, so a
+    // crash mid-write can't leave the user's menu file half-written.
+    writeMenuFileProc.command = ["bash", "-c",
+      "mkdir -p \"$(dirname -- \"$1\")\" || exit 0\n" +
+      "printf '%s' \"$2\" > \"$1.tmp\" && mv -f \"$1.tmp\" \"$1\"",
+      "--", service.menuExtensionsPath, merged]
+    writeMenuFileProc.running = true
+  }
+
+  Process { id: writeMenuFileProc; running: false }
 
   function setAppMuted(profileName, appName, muted) {
     var app = String(appName || "").trim()
@@ -137,7 +242,7 @@ Item {
         return String(a).trim().toLowerCase() !== app.toLowerCase()
       })
       if (muted) apps.push(app)
-      next.push({ name: p.name, icon: p.icon, muteApps: apps, dndAll: p.dndAll })
+      next.push({ name: p.name, icon: p.icon, muteApps: apps, dndAll: p.dndAll, allowUnknownApps: p.allowUnknownApps })
     }
     if (!found) return false
     service.profiles = next
@@ -145,17 +250,74 @@ Item {
     return true
   }
 
-  // Records a sender the first time it's heard from. Capped so a misbehaving
-  // app that randomises its app_name can't grow the settings file unbounded.
+  // value is true/false to override the global setting for this profile, or
+  // null to go back to inheriting it.
+  function setProfileAllowUnknownApps(profileName, value) {
+    var next = []
+    var found = false
+    for (var i = 0; i < service.profiles.length; i++) {
+      var p = service.profiles[i]
+      if (p.name !== String(profileName || "")) { next.push(p); continue }
+      found = true
+      next.push({ name: p.name, icon: p.icon, muteApps: p.muteApps, dndAll: p.dndAll, allowUnknownApps: value })
+    }
+    if (!found) return false
+    service.profiles = next
+    service.scheduleSettingsSave()
+    return true
+  }
+
+  // Records a sender, refreshing its lastSeen if already tracked. Capped so
+  // a misbehaving app that randomises its app_name can't grow the settings
+  // file unbounded — the oldest entry is dropped to make room, same as the
+  // 30-day prune would eventually get it anyway.
   readonly property int seenAppsLimit: 200
+  readonly property int seenAppsMaxAgeMs: 30 * 24 * 60 * 60 * 1000
   function recordSeenApp(appName) {
     var app = String(appName || "").trim()
-    if (!app || service.seenApps.length >= service.seenAppsLimit) return
-    for (var i = 0; i < service.seenApps.length; i++) {
-      if (service.seenApps[i] === app) return
+    if (!app) return
+    var now = Date.now()
+    var next = service.seenApps.filter(function(e) { return e.name !== app })
+    next.push({ name: app, lastSeen: now })
+    next.sort(function(a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
+    if (next.length > service.seenAppsLimit) {
+      next.sort(function(a, b) { return a.lastSeen - b.lastSeen })
+      next = next.slice(next.length - service.seenAppsLimit)
+      next.sort(function(a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
     }
-    service.seenApps = service.seenApps.concat([app]).sort()
+    service.seenApps = next
     service.scheduleSettingsSave()
+  }
+
+  // Drops one name from the tracked list — test senders and one-off scripts
+  // otherwise pile up here forever with nothing to prune them. The next
+  // notification from that app re-adds it, same as it was seen the first
+  // time; this only clears the stale entry, not a standing block.
+  function forgetSeenApp(appName) {
+    var app = String(appName || "").trim()
+    if (!app) return
+    service.seenApps = service.seenApps.filter(function(e) { return e.name !== app })
+    service.scheduleSettingsSave()
+  }
+
+  // Ages out anything not seen in 30 days. Run at startup and periodically
+  // (see pruneTimer) rather than only on the next notification, so a name
+  // that genuinely stopped sending altogether still eventually clears.
+  function pruneSeenApps() {
+    var cutoff = Date.now() - service.seenAppsMaxAgeMs
+    var next = service.seenApps.filter(function(e) { return (e.lastSeen || 0) >= cutoff })
+    if (next.length === service.seenApps.length) return
+    service.seenApps = next
+    service.scheduleSettingsSave()
+  }
+
+  Timer {
+    // Once a day is plenty for a 30-day threshold — this isn't chasing
+    // precision, just making sure prune isn't only-on-restart.
+    interval: 24 * 60 * 60 * 1000
+    running: true
+    repeat: true
+    onTriggered: service.pruneSeenApps()
   }
 
   // popupModel feeds the on-screen toast stack — the only model the service
@@ -242,7 +404,27 @@ Item {
         delete service.liveRefs[snapshot.originalId]
     })
 
+    // Checked before recordSeenApp — that call is what makes the app known,
+    // so the check has to run against the state from before this very
+    // notification, or an app could never be "unknown" by the time it's
+    // asked about. A profile's own allowUnknownApps overrides the global
+    // default when set; null means "use the global".
+    var effectiveAllowUnknown = service.activeProfile && service.activeProfile.allowUnknownApps !== null
+      ? service.activeProfile.allowUnknownApps
+      : service.allowUnknownApps
+    var wasUnknownApp = !effectiveAllowUnknown &&
+      NotificationLogic.findSeenApp(service.seenApps, notification.appName) === null
     service.recordSeenApp(notification.appName)
+
+    // A first-time sender blocked by allowUnknownApps isn't silenced just
+    // this once — it's muted in the active profile going forward, the same
+    // as if the user had opted it in manually. Without this, the *next*
+    // notification from the same app would find it already in seenApps
+    // (recordSeenApp just added it) and let it straight through, which is
+    // not what "block apps I haven't approved" means.
+    if (wasUnknownApp) {
+      service.setAppMuted(service.activeProfileName, notification.appName, true)
+    }
 
     // The active profile silences this sender, or silences everything. Same
     // treatment as DND from here on — a silenced notification still earns its
@@ -254,7 +436,7 @@ Item {
     // DND bypass rules: chat apps abuse urgency=critical to force
     // visibility, so critical alone isn't enough — we also require the
     // sender to be CLI-style. See shouldBypassDnd().
-    if ((service.doNotDisturb || profileSilenced) && !shouldBypassDnd(notification)) {
+    if ((service.doNotDisturb || profileSilenced || wasUnknownApp) && !shouldBypassDnd(notification)) {
       // The toast never shows, so the only record a silenced notification
       // can leave is a history entry. Write it straight into history —
       // "what did I miss while silenced" is exactly what history is for.
@@ -482,8 +664,22 @@ Item {
 
   // Try to focus an existing Hyprland window matching the notification's
   // sender. The helper handles case-insensitive class matching.
+  //
+  // A Chromium web-notification's body leads with the sending page's own
+  // URL (see bodyLinkUrl) — window-focus alone raises the browser but lands
+  // wherever it already was, not the tab the notification was about.
+  // Opening that URL directly is the one thing that reliably gets there:
+  // xdg-open on an http(s) URL hands it to the default browser, which
+  // reuses an existing tab for that origin rather than opening a new one
+  // when the site is already loaded there.
   function focusApp(entry) {
     if (!entry || !entry.app) return
+    var url = NotificationLogic.bodyLinkUrl(entry.body)
+    if (url) {
+      openUrlProc.command = ["xdg-open", url]
+      openUrlProc.running = true
+      return
+    }
     focusAppProc.command = [
       service.omarchyPath + "/bin/omarchy-hyprland-focus-app",
       String(entry.app)
@@ -492,6 +688,7 @@ Item {
   }
 
   Process { id: focusAppProc; running: false }
+  Process { id: openUrlProc; running: false }
 
   Process {
     id: ensureDirsProc
@@ -676,6 +873,18 @@ Item {
       "  stale=\"${f##*/}\"\n" +
       "  rm -f \"$f\" \"$2/${stale%.json}\"-*\n" +
       "done", "--", historyDir, imagesDir])
+  }
+
+  // Drops one archived notification and its image copy, named by the same
+  // "<timestamp>-<originalId>" stem clearHistory sweeps in bulk. The stem is
+  // taken as an argument rather than rebuilt here so a malformed one can't
+  // walk outside historyDir — validated before it ever reaches the shell.
+  function removeHistoryEntry(stem) {
+    var safe = String(stem || "")
+    if (!/^[0-9]+-[0-9]+$/.test(safe)) return
+    enqueuePopupFileJob(["bash", "-c",
+      "rm -f \"$1/$3.json\" \"$2/$3\"-*", "--",
+      historyDir, imagesDir, safe])
   }
 
   // A restart can kill a queued job between its cp and its JSON write,
@@ -910,21 +1119,32 @@ Item {
     if (parsed.profiles && parsed.profiles.length) service.profiles = parsed.profiles
     if (parsed.activeProfile) service.activeProfileName = parsed.activeProfile
     if (parsed.seenApps) service.seenApps = parsed.seenApps
+    if (parsed.allowUnknownApps !== null) service.allowUnknownApps = parsed.allowUnknownApps
 
     service.settingsLoaded = true
+    // A machine that's been off for a while, or just upgraded from before
+    // lastSeen existed, shouldn't wait a full day for the periodic timer to
+    // catch entries that are already past 30 days old.
+    service.pruneSeenApps()
     // Versions before the history moved into its own directory kept every
     // notification in here. Rewrite once so that dead payload doesn't sit in
     // the file until the next DND toggle happens to clear it.
     if (parsed.legacy) service.scheduleSettingsSave()
+    // Keeps the Super+Space menu right from the first load — a fresh shell
+    // process only reaches this once, and the profile list it just hydrated
+    // may not match whatever the menu file's managed block currently shows
+    // (e.g. it was hand-edited, or a profile changed while the shell was down).
+    service.syncProfilesMenu()
   }
 
   function flushSettings() {
     settingsFile.setText(JSON.stringify({
-      version: 4,
+      version: 5,
       dnd: persisted.doNotDisturb,
       activeProfile: service.activeProfileName,
       profiles: service.profiles,
-      seenApps: service.seenApps
+      seenApps: service.seenApps,
+      allowUnknownApps: service.allowUnknownApps
     }, null, 2) + "\n")
   }
 
@@ -984,6 +1204,21 @@ Item {
       return "ok"
     }
 
+    // One archived notification, by its "<timestamp>-<originalId>" stem.
+    function removeHistoryEntry(stem: string): string {
+      service.removeHistoryEntry(stem)
+      return "ok"
+    }
+
+    // Clicking a history row: no live Notification object survives into the
+    // archive, so there's no stored action to replay — focusing the sender
+    // by app name is what invokePopupDefault already falls back to for chat
+    // apps, and it's the only thing an archived entry can still do.
+    function focusHistoryApp(app: string, body: string): string {
+      service.focusApp({ app: String(app || ""), body: String(body || "") })
+      return "ok"
+    }
+
     function dismissAll(): string {
       service.clearPopups()
       return "ok"
@@ -1029,7 +1264,8 @@ Item {
       return JSON.stringify({
         active: service.activeProfileName,
         profiles: service.profiles,
-        seenApps: service.seenApps
+        seenApps: service.seenAppNames,
+        allowUnknownApps: service.allowUnknownApps
       })
     }
 
@@ -1046,6 +1282,11 @@ Item {
     }
 
     // Whole-list replacement from the config panel, as a JSON array.
+    // Takes {"profiles": [...]} rather than a bare JSON array: qs ipc's
+    // argv parsing strips a leading "[" / trailing "]" from an argument
+    // that starts and ends with them, so a bare array arrives at
+    // JSON.parse missing its outer brackets. Wrapping in an object sidesteps
+    // that entirely.
     function saveProfiles(json: string): string {
       var parsed = null
       try {
@@ -1053,8 +1294,8 @@ Item {
       } catch (e) {
         return "invalid"
       }
-      if (!Array.isArray(parsed)) return "invalid"
-      service.setProfiles(parsed)
+      if (!parsed || !Array.isArray(parsed.profiles)) return "invalid"
+      service.setProfiles(parsed.profiles)
       return "ok"
     }
 
@@ -1064,6 +1305,31 @@ Item {
 
     function unmuteApp(profileName: string, appName: string): string {
       return service.setAppMuted(profileName, appName, false) ? "ok" : "unknown"
+    }
+
+    // value: "true" / "false" to override the global allowUnknownApps for
+    // this profile, "inherit" (or anything else) to go back to the global.
+    function setProfileAllowUnknownApps(profileName: string, value: string): string {
+      var v = String(value || "").toLowerCase()
+      var stored = v === "true" ? true : (v === "false" ? false : null)
+      return service.setProfileAllowUnknownApps(profileName, stored) ? "ok" : "unknown"
+    }
+
+    // Drops one tracked app so it stops cluttering the mute list. Not a
+    // block: the next notification from it re-adds it, seen fresh.
+    function forgetSeenApp(appName: string): string {
+      service.forgetSeenApp(appName)
+      return "ok"
+    }
+
+    function allowUnknownApps(): string {
+      return service.allowUnknownApps ? "true" : "false"
+    }
+
+    function setAllowUnknownApps(value: string): string {
+      var v = String(value || "").toLowerCase()
+      service.setAllowUnknownApps(v === "true" || v === "1" || v === "on" || v === "yes")
+      return service.allowUnknownApps ? "true" : "false"
     }
 
     function ping(): string { return "ok" }

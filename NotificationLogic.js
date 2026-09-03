@@ -98,6 +98,23 @@ function sanitizeBody(body, app, appIcon) {
     .replace(/^\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?\s+/i, "")
 }
 
+// Chromium web-notification bodies lead with the sending page's own URL, as
+// either a bare "www.example.com" line or a "<a href=...>...</a>" tag —
+// sanitizeBody strips it as redundant display noise, but it's the one piece
+// of data that can point a click at the right page rather than just the
+// browser's window. Pulled from the raw (pre-sanitize) body, since the
+// stripped text has already lost it by the time a click needs it.
+function bodyLinkUrl(body) {
+  var text = String(body || "")
+  var hrefMatch = text.match(/^\s*<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/i)
+  if (hrefMatch) return hrefMatch[1]
+
+  var bareMatch = text.match(/^\s*((?:https?:\/\/|www\.)(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?)/i)
+  if (bareMatch) return /^https?:\/\//i.test(bareMatch[1]) ? bareMatch[1] : "https://" + bareMatch[1]
+
+  return ""
+}
+
 function summaryStartsWithGlyph(summary) {
   var text = String(summary || "").replace(/^\s+/, "")
   if (!text) return false
@@ -258,7 +275,7 @@ function historyEntry(value, normalUrgency) {
 // so the service can rewrite the file without the dead payload.
 function parseSettings(raw) {
   var text = String(raw || "").trim()
-  if (!text) return { error: false, dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null }
+  if (!text) return { error: false, dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null }
 
   try {
     var parsed = JSON.parse(text)
@@ -268,11 +285,40 @@ function parseSettings(raw) {
       legacy: !!(parsed && (parsed.pending || parsed.past || parsed.entries)),
       profiles: parsed && Array.isArray(parsed.profiles) ? sanitizeProfiles(parsed.profiles) : null,
       activeProfile: parsed && typeof parsed.activeProfile === "string" ? parsed.activeProfile : null,
-      seenApps: parsed && Array.isArray(parsed.seenApps) ? sanitizeAppNames(parsed.seenApps) : null
+      seenApps: parsed && Array.isArray(parsed.seenApps) ? sanitizeSeenApps(parsed.seenApps) : null,
+      allowUnknownApps: parsed && typeof parsed.allowUnknownApps === "boolean" ? parsed.allowUnknownApps : null
     }
   } catch (e) {
-    return { error: true, errorMessage: String(e), dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null }
+    return { error: true, errorMessage: String(e), dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null }
   }
+}
+
+// seenApps moved from a flat name array to {name, lastSeen} objects so
+// entries can age out after 30 days — a settings file from before that
+// change carries the old shape, and gets each name stamped with "now" so it
+// isn't pruned immediately on the first load after upgrading.
+function sanitizeSeenApps(list) {
+  var out = []
+  var seen = {}
+  var now = Date.now()
+  for (var i = 0; i < (list || []).length; i++) {
+    var raw = list[i]
+    var name, lastSeen
+    if (typeof raw === "string") {
+      name = raw.trim()
+      lastSeen = now
+    } else if (raw && typeof raw === "object") {
+      name = String(raw.name || "").trim()
+      lastSeen = Number(raw.lastSeen)
+      if (!isFinite(lastSeen) || lastSeen <= 0) lastSeen = now
+    } else {
+      continue
+    }
+    if (!name || seen[name]) continue
+    seen[name] = true
+    out.push({ name: name, lastSeen: lastSeen })
+  }
+  return out
 }
 
 // ---------------------------------------------------- notification profiles
@@ -288,9 +334,9 @@ function parseSettings(raw) {
 // muting profile is one click rather than a rule-by-rule undo.
 function defaultProfiles() {
   return [
-    { name: "Normal", icon: "󰶚", muteApps: [], dndAll: false },
-    { name: "Work", icon: "󰂱", muteApps: [], dndAll: false },
-    { name: "Game", icon: "󰖃", muteApps: [], dndAll: false }
+    { name: "Normal", icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null },
+    { name: "Work", icon: "󰂱", muteApps: [], dndAll: false, allowUnknownApps: null },
+    { name: "Game", icon: "󰖃", muteApps: [], dndAll: false, allowUnknownApps: null }
   ]
 }
 
@@ -320,10 +366,117 @@ function sanitizeProfiles(list) {
       name: name,
       icon: String(raw.icon || ""),
       muteApps: sanitizeAppNames(raw.muteApps),
-      dndAll: !!raw.dndAll
+      dndAll: !!raw.dndAll,
+      // null inherits the global allowUnknownApps setting; true/false
+      // overrides it for this profile specifically.
+      allowUnknownApps: typeof raw.allowUnknownApps === "boolean" ? raw.allowUnknownApps : null
     })
   }
   return out
+}
+
+function findSeenApp(seenApps, name) {
+  var needle = String(name || "")
+  for (var i = 0; i < (seenApps || []).length; i++) {
+    if (seenApps[i] && seenApps[i].name === needle) return seenApps[i]
+  }
+  return null
+}
+
+// True when two profile lists show the same set of names with the same
+// icons, in any order — the only two fields the Super+Space menu actually
+// renders (see Service.qml's syncProfilesMenu). Order and every other field
+// (muteApps, dndAll, allowUnknownApps) are irrelevant to what the menu
+// looks like, so a pure rule edit compares equal here and skips a rewrite.
+function sameProfileIdentities(a, b) {
+  var listA = (a || []).map(function(p) { return String(p.name || "") + "|" + String(p.icon || "") }).sort()
+  var listB = (b || []).map(function(p) { return String(p.name || "") + "|" + String(p.icon || "") }).sort()
+  if (listA.length !== listB.length) return false
+  for (var i = 0; i < listA.length; i++) {
+    if (listA[i] !== listB[i]) return false
+  }
+  return true
+}
+
+// ---------------------------------------------------- Super+Space menu sync
+//
+// Builds the JSONC lines for a "Profiles" submenu (one row per profile, plus
+// the submenu header row) and splices them into a marked region of the
+// user's menu extensions file — see Service.qml's syncProfilesMenu for why
+// this has to be generated rather than static.
+
+// Escapes a value for both JSON-string and embedded-shell-single-quote
+// contexts at once: the JSON string escaping (quotes, backslashes) happens
+// first via JSON.stringify, then the result — still containing the raw
+// profile name — is safe to drop into the `checked` shell expression's own
+// single-quoted string because single quotes inside it are neutralized by
+// closing/reopening the quote ('\'') the standard POSIX way. A name holding
+// a literal `'` is the only character that needs that; JSON.stringify
+// already made `"`, `\`, and control characters safe for the JSON side.
+function shellSingleQuote(value) {
+  return "'" + String(value || "").replace(/'/g, "'\\''") + "'"
+}
+
+function profilesMenuBlock(profiles, markerStart, markerEnd, idFor) {
+  var used = {}
+  var lines = [markerStart]
+  lines.push('  "profiles": {"icon":"󰂚","label":"Profiles","aliases":["profile","notifications"]},')
+  for (var i = 0; i < (profiles || []).length; i++) {
+    var p = profiles[i]
+    if (!p || !p.name) continue
+    var id = idFor(p.name, used)
+    var icon = p.icon || "󰂚"
+    var nameJson = JSON.stringify(p.name)
+    var iconJson = JSON.stringify(icon)
+    var idJson = JSON.stringify("profiles." + id)
+    var setProfileCmd = "omarchy-shell notifications setProfile " + shellSingleQuote(p.name)
+    var checkedExpr = "[ \"$(omarchy-shell notifications activeProfile)\" = " + shellSingleQuote(p.name) + " ]"
+    lines.push("  " + idJson + ": {\"icon\":" + iconJson + ",\"label\":" + nameJson +
+      ",\"action\":" + JSON.stringify(setProfileCmd) + ",\"checked\":" + JSON.stringify(checkedExpr) + "},")
+  }
+  lines.push(markerEnd)
+  return lines.join("\n")
+}
+
+// Replaces the region between markerStart/markerEnd (inclusive) with block,
+// or inserts block just before the file's final "}" when the markers aren't
+// present yet. Returns null when the existing content doesn't look like a
+// single JSONC object (no trailing "}" found) — callers should leave the
+// file alone rather than guess at a malformed one.
+function spliceMenuBlock(existingRaw, block, markerStart, markerEnd) {
+  var text = String(existingRaw || "").replace(/\r\n/g, "\n")
+  if (!text.trim()) {
+    return "{\n" + block + "\n}\n"
+  }
+
+  var startIdx = text.indexOf(markerStart)
+  var endIdx = startIdx >= 0 ? text.indexOf(markerEnd, startIdx) : -1
+  if (startIdx >= 0 && endIdx >= 0) {
+    var before = text.slice(0, startIdx)
+    var after = text.slice(endIdx + markerEnd.length)
+    // block already ends with markerEnd and no trailing newline of its own —
+    // exactly one newline belongs between it and whatever follows (the
+    // closing "}" on a fresh file, or blank-line padding on a repeated
+    // sync). `after` normally already starts with that newline (this is
+    // itself the output of a previous sync, or hand-typed the same way);
+    // only synthesize one when it's missing, never strip one that's there.
+    if (after.charAt(0) !== "\n") after = "\n" + after
+    return before + block + after
+  }
+
+  // No existing markers: insert as new top-level entries just before the
+  // last "}" in the file, matching how a person would hand-add entries.
+  var lastBrace = text.lastIndexOf("}")
+  if (lastBrace < 0) return null
+  var head = text.slice(0, lastBrace)
+  var tail = text.slice(lastBrace)
+  // The object needs a trailing comma before new keys if the last real line
+  // before the closing brace doesn't already end with one (a file with no
+  // trailing comma on its last entry, unlike this plugin's own writes).
+  var trimmedHead = head.replace(/\s+$/, "")
+  var needsComma = trimmedHead.length > 0 && trimmedHead.charAt(trimmedHead.length - 1) !== "," &&
+    trimmedHead.charAt(trimmedHead.length - 1) !== "{"
+  return trimmedHead + (needsComma ? "," : "") + "\n" + block + "\n" + tail
 }
 
 function findProfile(profiles, name) {
@@ -550,6 +703,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     isChromiumDerived: isChromiumDerived,
     sanitizeBody: sanitizeBody,
+    bodyLinkUrl: bodyLinkUrl,
     styledBody: styledBody,
     summaryStartsWithGlyph: summaryStartsWithGlyph,
     shouldBypassDnd: shouldBypassDnd,
@@ -568,6 +722,11 @@ if (typeof module !== "undefined") {
     defaultProfiles: defaultProfiles,
     sanitizeProfiles: sanitizeProfiles,
     sanitizeAppNames: sanitizeAppNames,
+    sanitizeSeenApps: sanitizeSeenApps,
+    findSeenApp: findSeenApp,
+    sameProfileIdentities: sameProfileIdentities,
+    profilesMenuBlock: profilesMenuBlock,
+    spliceMenuBlock: spliceMenuBlock,
     findProfile: findProfile,
     resolveActiveProfile: resolveActiveProfile,
     profileSilences: profileSilences,

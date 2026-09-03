@@ -7,6 +7,7 @@
 // half-written rule set.
 
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -21,6 +22,7 @@ Panel {
   property var profiles: []
   property string activeName: ""
   property var seenApps: []
+  property bool allowUnknownApps: true
 
   // Which profile the editor is showing. Empty means the switcher list.
   property string editingName: ""
@@ -29,7 +31,106 @@ Panel {
   property var historyRows: []
   property bool historyLoading: false
 
-  readonly property var editing: findProfile(editingName)
+  // The editor works on a local copy and only reaches the daemon on Save —
+  // every earlier version sent each toggle immediately, which is fine for a
+  // switch but wrong for a name/icon a person is still deciding on, and it's
+  // what a new profile needs anyway: nothing to show in the switcher until
+  // there's a Create to press.
+  property var draft: null
+  property bool draftIsNew: false
+  property bool iconPickerOpen: false
+
+  readonly property var availableIcons: [
+    "󰂚", "󰂱", "󰖃", "󰽥", "󰖨", "󰋜", "󰋑", "󰓎", "󰈻", "󰄦",
+    "󰂺", "󰝚", "󰅩", "󰒃", "󰊄", "󰀝", "󰄋", "󰣆", "󰄐", "󰉚",
+    "󰏲", "󰇮", "󰃭", "󰔂", "󰋋", "󰜎", "󰂴", "󰏑", "󰕷", "󰌧",
+    "󰐗", "󰑦", "󰒓", "󰄨", "󰌾", "󰃢"
+  ]
+
+  function openEditor(profile, isNew) {
+    root.draft = {
+      name: profile.name,
+      icon: profile.icon || "",
+      muteApps: (profile.muteApps || []).slice(),
+      dndAll: !!profile.dndAll,
+      // null inherits the global "allow unknown apps" setting; a boolean
+      // overrides it just for this profile.
+      allowUnknownApps: typeof profile.allowUnknownApps === "boolean" ? profile.allowUnknownApps : null
+    }
+    root.draftIsNew = !!isNew
+    root.editingName = profile.name
+    root.iconPickerOpen = false
+    root.view = "editor"
+  }
+
+  function closeEditor() {
+    root.draft = null
+    root.editingName = ""
+    root.iconPickerOpen = false
+    root.view = "switcher"
+  }
+
+  // Every draft edit goes through this: one place that carries every field
+  // forward, so adding a field to the draft only means changing it here
+  // instead of at each call site that happens to build one.
+  function mergeDraft(changes) {
+    if (!root.draft) return
+    root.draft = {
+      name: changes.name !== undefined ? changes.name : root.draft.name,
+      icon: changes.icon !== undefined ? changes.icon : root.draft.icon,
+      muteApps: changes.muteApps !== undefined ? changes.muteApps : root.draft.muteApps,
+      dndAll: changes.dndAll !== undefined ? changes.dndAll : root.draft.dndAll,
+      allowUnknownApps: changes.allowUnknownApps !== undefined ? changes.allowUnknownApps : root.draft.allowUnknownApps
+    }
+  }
+
+  function draftMuted(app) {
+    if (!root.draft) return false
+    var needle = String(app || "").toLowerCase()
+    var list = root.draft.muteApps || []
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i]).toLowerCase() === needle) return true
+    }
+    return false
+  }
+
+  function setDraftMuted(app, muted) {
+    if (!root.draft) return
+    var needle = String(app || "").trim()
+    if (!needle) return
+    var apps = (root.draft.muteApps || []).filter(function(a) {
+      return String(a).trim().toLowerCase() !== needle.toLowerCase()
+    })
+    if (muted) apps.push(needle)
+    root.mergeDraft({ muteApps: apps })
+  }
+
+  // Saves the draft: a rename target still has to be unique, an empty name
+  // just keeps the old one rather than saving something unusable.
+  function saveDraft() {
+    if (!root.draft) return
+    var wanted = String(root.draft.name || "").trim()
+    if (!wanted) wanted = root.editingName
+    if (wanted !== root.editingName && root.findProfile(wanted)) wanted = root.editingName
+
+    var entry = {
+      name: wanted,
+      icon: root.draft.icon,
+      muteApps: root.draft.muteApps,
+      dndAll: root.draft.dndAll,
+      allowUnknownApps: root.draft.allowUnknownApps
+    }
+    var next
+    if (root.draftIsNew) {
+      next = root.profiles.concat([entry])
+    } else {
+      next = root.profiles.map(function(p) { return p.name === root.editingName ? entry : p })
+    }
+    root.profiles = next
+    saveProfiles(next)
+    root.closeEditor()
+  }
+
   readonly property var active: findProfile(activeName)
   readonly property string icon: active && active.icon ? active.icon : "󰂚"
   readonly property bool showName: setting("showProfileName", true) === true
@@ -80,6 +181,17 @@ Panel {
     root.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : []
     root.activeName = String(parsed.active || "")
     root.seenApps = Array.isArray(parsed.seenApps) ? parsed.seenApps : []
+    if (typeof parsed.allowUnknownApps === "boolean") root.allowUnknownApps = parsed.allowUnknownApps
+  }
+
+  function setAllowUnknownApps(value) {
+    root.allowUnknownApps = value
+    run(["setAllowUnknownApps", value ? "true" : "false"])
+  }
+
+  function forgetSeenApp(app) {
+    root.seenApps = root.seenApps.filter(function(a) { return a !== app })
+    run(["forgetSeenApp", app])
   }
 
   function run(args) {
@@ -93,52 +205,40 @@ Panel {
   }
 
   function saveProfiles(list) {
-    run(["saveProfiles", JSON.stringify(list)])
+    // Sent as {"profiles": [...]}, not a bare array — qs ipc's argv parsing
+    // strips a leading "[" / trailing "]" from an argument that is exactly
+    // one, which silently truncated every save to garbage. See the matching
+    // note on the daemon's saveProfiles.
+    run(["saveProfiles", JSON.stringify({ profiles: list })])
   }
 
-  // Rebuilds the list with one profile replaced. The editor edits a copy and
-  // sends the whole thing, which is also what keeps rename safe: the daemon
-  // re-points activeProfile itself when the name it held disappears.
-  function replaceProfile(name, changes) {
-    var next = []
-    for (var i = 0; i < profiles.length; i++) {
-      var p = profiles[i]
-      if (p.name !== name) { next.push(p); continue }
-      next.push({
-        name: changes.name !== undefined ? changes.name : p.name,
-        icon: changes.icon !== undefined ? changes.icon : p.icon,
-        muteApps: changes.muteApps !== undefined ? changes.muteApps : p.muteApps,
-        dndAll: changes.dndAll !== undefined ? changes.dndAll : p.dndAll
-      })
-    }
-    saveProfiles(next)
-    if (changes.name !== undefined) root.editingName = changes.name
-  }
-
+  // Opens the editor on a fresh draft. Names are the identity the daemon
+  // matches on, so a new one has to be unique before Save ever sends it —
+  // nothing is written until then, unlike the old version which created and
+  // saved the profile immediately on click.
   function addProfile() {
-    // Names are the identity the daemon matches on, so a new one has to be
-    // unique before it is sent.
     var base = "New profile"
     var name = base
     var n = 2
     while (findProfile(name)) { name = base + " " + n; n++ }
-    saveProfiles(profiles.concat([{ name: name, icon: "󰂚", muteApps: [], dndAll: false }]))
-    root.editingName = name
-    root.view = "editor"
+    root.openEditor({ name: name, icon: root.availableIcons[0], muteApps: [], dndAll: false }, true)
   }
 
+  // Mirrors Service.qml's defaultProfileName — the daemon is authoritative
+  // and re-adds this one if a list ever arrives without it, but the button
+  // is hidden here too so deleting it never looks like an option in the
+  // first place.
+  readonly property string defaultProfileName: "Normal"
+
   function deleteProfile(name) {
+    if (name === root.defaultProfileName) return
     var next = profiles.filter(function(p) { return p.name !== name })
     // The daemon falls back to the first profile when the list empties, but a
     // list with nothing in it silences the switcher entirely — keep one.
     if (!next.length) return
+    root.profiles = next
     saveProfiles(next)
-    root.editingName = ""
-    root.view = "switcher"
-  }
-
-  function toggleMute(profileName, app, muted) {
-    run([muted ? "muteApp" : "unmuteApp", profileName, app])
+    root.closeEditor()
   }
 
   // ---------------------------------------------------------------- history
@@ -183,6 +283,19 @@ Panel {
     root.historyRows = rows.slice(0, 50)
   }
 
+  // Same resolution NotificationCard.qml uses for the live toast's icon: a
+  // file:// or image:// value is used as-is, an absolute path is turned into
+  // a file URL, and anything else (a bare name like "brave-browser") is
+  // looked up as a themed icon. History rows persist appIcon as this same
+  // string, so it resolves exactly the same way once archived.
+  function iconSource(icon) {
+    var value = String(icon || "")
+    if (value.length === 0) return ""
+    if (value.indexOf("file://") === 0 || value.indexOf("image://") === 0) return value
+    if (value.charAt(0) === "/") return Util.fileUrl(value)
+    return Quickshell.iconPath(value, true)
+  }
+
   function relativeTime(ms) {
     var deltaSec = Math.max(0, Math.round((Date.now() - Number(ms || 0)) / 1000))
     if (deltaSec < 60) return "just now"
@@ -210,8 +323,7 @@ Panel {
   // command line while the panel is closed.
   onOpenedChanged: {
     if (opened) {
-      root.editingName = ""
-      root.view = "switcher"
+      root.closeEditor()
       refresh.running = true
       root.loadHistory()
     }
@@ -247,9 +359,9 @@ Panel {
     if (button === Qt.RightButton) {
       // Straight into the editor for what is on now — the common reason to
       // right-click is "this profile just let something through".
-      root.editingName = root.activeName
-      root.view = "editor"
       if (!root.opened) root.open()
+      var current = root.findProfile(root.activeName)
+      if (current) root.openEditor(current, false)
     } else {
       root.toggle()
     }
@@ -265,146 +377,303 @@ Panel {
     open: root.opened
     focusTarget: keys
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight)
+    // Capped well under a full screen: history can grow past that on its
+    // own, and the Flickable below is what makes the rest of the panel
+    // reachable once it does, rather than the whole card just growing
+    // off-screen.
+    contentHeight: panel.fittedContentHeight(
+      (profileStrip.visible ? profileStrip.implicitHeight + Style.space(12) : 0) + content.implicitHeight,
+      Style.space(480))
 
     PanelKeyCatcher {
       id: keys
       anchors.fill: parent
       onCloseRequested: {
-        // Escape backs out of the editor first, then closes the panel.
-        if (root.view !== "switcher") { root.editingName = ""; root.view = "switcher" }
+        // Escape backs out of the editor (discarding the draft) first, then
+        // closes the panel.
+        if (root.view !== "switcher") root.closeEditor()
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: content
-        anchors.fill: parent
-        spacing: Style.space(12)
+      // ---------- profile strip: pinned above the scrollable history below,
+      // not part of the Flickable, so it stays put while history scrolls ----------
 
-        // ---------- profile strip: always visible above history, one row of
-        // small chips rather than a full-width list, so the history below is
-        // still the majority of the panel ----------
+      Column {
+        id: profileStrip
+        width: parent.width
+        spacing: Style.space(6)
+        visible: root.view !== "editor"
+
+        PanelSectionHeader {
+          width: parent.width
+          text: "Notification profile"
+          fontFamily: root.fontFamily
+          foreground: root.foreground
+        }
+
+        // One profile chip's visuals + behavior, shared between the two
+        // container modes below so switching modes at the cap never means
+        // two copies of this to keep in sync.
+        Component {
+          id: profileChipComponent
+
+          Rectangle {
+            id: chipRoot
+            required property var modelData
+            readonly property bool isActive: modelData.name === root.activeName
+
+            // Flow mode sizes each chip to its content (a Flow, unlike
+            // Column, never stretches children); the scrollable-list mode
+            // stretches every row to the list's full width instead, which
+            // reads better as a list than a run of left-aligned pills would.
+            // Left/right-anchored content below (rather than centered) means
+            // this doesn't need its own separate layout per mode — a
+            // compact chip's width already equals its content's natural
+            // width, so the anchors collapse to the same look either way.
+            //
+            // Both Repeaters exist at once (one under a hidden Flow), so
+            // which mode is active is read from the same global condition
+            // that decides Flow-vs-list visibility, not from this instance's
+            // own parent — a per-parent-type check can't tell "the Flow I'm
+            // in happens to be the hidden one right now" from "the visible
+            // one", since both are real Items either way.
+            readonly property bool stretchToFill: root.profiles.length > profileStrip.chipOverflowCap
+            width: stretchToFill && parent ? parent.width : implicitWidth
+            implicitWidth: nameText.implicitWidth + editChipBg.width + Style.space(24)
+            implicitHeight: Style.space(32)
+            radius: height / 2
+            color: chipMouse.containsMouse
+              ? Style.hoverFillFor(root.foreground, Color.accent)
+              : (isActive ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+            border.width: isActive ? 0 : 1
+            border.color: Qt.darker(root.foreground, 2.2)
+
+            MouseArea {
+              id: chipMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.switchTo(chipRoot.modelData.name)
+            }
+
+            Text {
+              id: nameText
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(12)
+              anchors.right: editChipBg.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              text: (chipRoot.modelData.icon || "󰂚") + "  " + chipRoot.modelData.name
+              color: chipRoot.isActive ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: chipRoot.isActive
+              elide: Text.ElideRight
+            }
+
+            // A second, smaller click target inside the chip: editing a
+            // profile is rarer than switching to it, so it doesn't need
+            // equal weight, just its own hit area — a small hover circle,
+            // same treatment as the other inline glyph buttons.
+            Rectangle {
+              id: editChipBg
+              width: Style.space(18)
+              height: Style.space(18)
+              radius: width / 2
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(7)
+              anchors.verticalCenter: parent.verticalCenter
+              color: editChipMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+              Text {
+                textFormat: Text.PlainText
+                anchors.centerIn: parent
+                text: "󰏫"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: editChipMouse
+                anchors.fill: parent
+                anchors.margins: -Style.space(2)
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: function(mouse) {
+                  mouse.accepted = true
+                  root.openEditor(chipRoot.modelData, false)
+                }
+              }
+            }
+          }
+        }
+
+        // The "+" add-chip, shared the same way — appended after the last
+        // profile chip in Flow mode, or as its own row below the list in
+        // scrollable mode.
+        Component {
+          id: addChipComponent
+
+          Rectangle {
+            implicitWidth: Style.space(30)
+            implicitHeight: Style.space(30)
+            radius: height / 2
+            color: addMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+            border.width: 1
+            border.color: Qt.darker(root.foreground, 2.2)
+
+            Text {
+              anchors.centerIn: parent
+              text: "+"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+            }
+
+            MouseArea {
+              id: addMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.addProfile()
+            }
+          }
+        }
+
+        // Past this many profiles a wrapping Flow starts eating too much of
+        // the panel's height on its own — a fixed-height scrollable list
+        // reads better than a chip block that can grow without bound.
+        readonly property int chipOverflowCap: 8
+
+        Flow {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.profiles.length <= profileStrip.chipOverflowCap
+
+          Repeater {
+            model: root.profiles
+            delegate: profileChipComponent
+          }
+
+          Loader { sourceComponent: addChipComponent }
+        }
 
         Column {
           width: parent.width
           spacing: Style.space(6)
-          visible: root.view !== "editor"
+          visible: root.profiles.length > profileStrip.chipOverflowCap
 
-          PanelSectionHeader {
+          // A handful of rows' worth of height, then it scrolls — long
+          // enough to feel like a real list, short enough that history below
+          // still gets the majority of the panel.
+          Flickable {
             width: parent.width
-            text: "Notification profile"
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-          }
+            height: Math.min(chipListColumn.implicitHeight, Style.space(32 * 5 + 6 * 4))
+            contentWidth: width
+            contentHeight: chipListColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            interactive: contentHeight > height
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          Flow {
-            width: parent.width
-            spacing: Style.space(6)
+            Column {
+              id: chipListColumn
+              width: parent.width
+              spacing: Style.space(6)
 
-            Repeater {
-              model: root.profiles
-
-              delegate: Rectangle {
-                required property var modelData
-                readonly property bool isActive: modelData.name === root.activeName
-
-                implicitWidth: chipRow.implicitWidth + Style.space(16)
-                implicitHeight: Style.space(30)
-                radius: height / 2
-                color: chipMouse.containsMouse
-                  ? Style.hoverFillFor(root.foreground, Color.accent)
-                  : (isActive ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
-                border.width: isActive ? 0 : 1
-                border.color: Qt.darker(root.foreground, 2.2)
-
-                MouseArea {
-                  id: chipMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.switchTo(modelData.name)
-                }
-
-                Row {
-                  id: chipRow
-                  anchors.centerIn: parent
-                  spacing: Style.space(6)
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: (modelData.icon || "󰂚") + "  " + modelData.name
-                    color: parent.parent.isActive ? root.foreground : root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: parent.parent.isActive
-                  }
-
-                  // A second, smaller click target inside the chip: editing a
-                  // profile is rarer than switching to it, so it doesn't need
-                  // equal weight, just its own hit area.
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "󰏫"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-
-                    MouseArea {
-                      anchors.fill: parent
-                      anchors.margins: -Style.space(4)
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: function(mouse) {
-                        mouse.accepted = true
-                        root.editingName = modelData.name
-                        root.view = "editor"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            // "+" chip matches the profile chips' shape so it reads as one
-            // more item in the same row rather than a separate control.
-            Rectangle {
-              implicitWidth: Style.space(30)
-              implicitHeight: Style.space(30)
-              radius: height / 2
-              color: addMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
-              border.width: 1
-              border.color: Qt.darker(root.foreground, 2.2)
-
-              Text {
-                anchors.centerIn: parent
-                text: "+"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.subtitle
-              }
-
-              MouseArea {
-                id: addMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.addProfile()
+              Repeater {
+                model: root.profiles
+                delegate: profileChipComponent
               }
             }
           }
 
-          PanelSeparator { width: parent.width }
+          Loader { sourceComponent: addChipComponent }
         }
 
-        // ---------- editor ----------
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(unknownAppsLabel.implicitHeight, unknownAppsSwitch.implicitHeight)
+
+          Column {
+            id: unknownAppsLabel
+            anchors.left: parent.left
+            anchors.right: unknownAppsSwitch.left
+            anchors.rightMargin: Style.space(10)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              text: "Allow apps you haven't seen before"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+              width: parent.width
+            }
+
+            Text {
+              text: root.allowUnknownApps
+                ? "On. A first-time sender shows normally."
+                : "Off. A first-time sender is silenced (still recorded below) until it's sent once and appears in the app list."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+              wrapMode: Text.WordWrap
+              width: parent.width
+            }
+          }
+
+          ToggleSwitch {
+            id: unknownAppsSwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            foreground: root.foreground
+            checked: root.allowUnknownApps
+            onToggled: root.setAllowUnknownApps(!root.allowUnknownApps)
+          }
+        }
+
+        PanelSeparator { width: parent.width }
+      }
+
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        // The strip above already reserved its own space in the Column below
+        // panelFlick's sibling slot — the Flickable only needs to yield the
+        // height profileStrip occupies, not re-lay it out itself.
+        anchors.topMargin: profileStrip.visible ? profileStrip.implicitHeight + Style.space(12) : 0
+        contentWidth: width
+        contentHeight: content.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { id: historyScrollBar; policy: ScrollBar.AsNeeded }
+
+      Column {
+        id: content
+        // Narrowed by the scrollbar's own width when it's actually taking up
+        // space (AsNeeded means it can be 0 while everything fits) — the
+        // remove button sits at the row's right edge, exactly where an
+        // overlaid scrollbar would land on top of it otherwise.
+        width: panelFlick.width - (historyScrollBar.visible ? historyScrollBar.width : 0)
+        spacing: Style.space(12)
+
+        // ---------- editor: works on root.draft, a local copy. Nothing
+        // reaches the daemon until Save/Create — Cancel and the back arrow
+        // both just discard it via closeEditor(). ----------
 
         Column {
           width: parent.width
           spacing: Style.space(10)
-          visible: root.view === "editor" && root.editing !== null
+          visible: root.view === "editor" && root.draft !== null
 
           Item {
             width: parent.width
@@ -418,7 +687,7 @@ Panel {
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
               text: "󰅁"
-              onPressed: function(b) { root.editingName = ""; root.view = "switcher" }
+              onPressed: function(b) { root.closeEditor() }
             }
 
             Text {
@@ -427,7 +696,7 @@ Panel {
               anchors.leftMargin: Style.space(8)
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              text: root.editing ? root.editing.name : ""
+              text: root.draftIsNew ? "New profile" : root.editingName
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -436,18 +705,105 @@ Panel {
             }
           }
 
-          TextField {
-            id: nameField
+          // ---- icon + name ----
+
+          Item {
             width: parent.width
-            foreground: root.foreground
-            placeholderText: "Profile name"
-            // Rebinding on every keystroke would fight the cursor; the text is
-            // seeded when the editor opens instead.
-            text: root.editing ? root.editing.name : ""
-            onAccepted: {
-              var wanted = String(text || "").trim()
-              if (wanted && wanted !== root.editingName && !root.findProfile(wanted)) {
-                root.replaceProfile(root.editingName, { name: wanted })
+            implicitHeight: Math.max(iconButton.height, nameField.implicitHeight)
+
+            Rectangle {
+              id: iconButton
+              width: Style.space(40)
+              height: Style.space(40)
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.spacing.labelGap
+              color: iconButtonMouse.containsMouse
+                ? Style.hoverFillFor(root.foreground, Color.accent)
+                : Style.normalFillFor(root.foreground, Color.accent)
+              border.width: 1
+              border.color: Qt.darker(root.foreground, 2.2)
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: root.draft ? (root.draft.icon || "󰂚") : "󰂚"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.subtitle
+              }
+
+              MouseArea {
+                id: iconButtonMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.iconPickerOpen = !root.iconPickerOpen
+              }
+            }
+
+            TextField {
+              id: nameField
+              anchors.left: iconButton.right
+              anchors.leftMargin: Style.space(10)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              foreground: root.foreground
+              placeholderText: "Profile name"
+              // Rebinding on every keystroke would fight the cursor; the
+              // text is seeded once when the editor opens instead, and
+              // synced into the draft as it's typed — no immediate send.
+              text: root.draft ? root.draft.name : ""
+              onTextChanged: {
+                if (root.draft && text !== root.draft.name)
+                  root.mergeDraft({ name: text })
+              }
+            }
+          }
+
+          // ---- icon picker: a fixed palette rather than free typing, so
+          // every choice is a glyph already known to render on this bar ----
+
+          Flow {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.iconPickerOpen
+
+            Repeater {
+              model: root.availableIcons
+
+              delegate: Rectangle {
+                required property string modelData
+                readonly property bool isSelected: root.draft && root.draft.icon === modelData
+
+                width: Style.space(32)
+                height: Style.space(32)
+                radius: Style.spacing.labelGap
+                color: iconOptionMouse.containsMouse
+                  ? Style.hoverFillFor(root.foreground, Color.accent)
+                  : (isSelected ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                border.width: isSelected ? 0 : 1
+                border.color: Qt.darker(root.foreground, 2.2)
+
+                Text {
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: modelData
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.subtitle
+                }
+
+                MouseArea {
+                  id: iconOptionMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.mergeDraft({ icon: modelData })
+                    root.iconPickerOpen = false
+                  }
+                }
               }
             }
           }
@@ -488,8 +844,63 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.foreground
-              checked: root.editing ? !!root.editing.dndAll : false
-              onToggled: root.replaceProfile(root.editingName, { dndAll: !root.editing.dndAll })
+              checked: root.draft ? !!root.draft.dndAll : false
+              onToggled: root.mergeDraft({ dndAll: !root.draft.dndAll })
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              text: "Apps you haven't seen before"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+              width: parent.width
+            }
+
+            Text {
+              text: "Overrides the global setting just for this profile."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+              width: parent.width
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Button {
+                width: (parent.width - Style.space(12)) / 3
+                text: "Use global"
+                selected: root.draft && root.draft.allowUnknownApps === null
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                onClicked: root.mergeDraft({ allowUnknownApps: null })
+              }
+
+              Button {
+                width: (parent.width - Style.space(12)) / 3
+                text: "Allow"
+                selected: root.draft && root.draft.allowUnknownApps === true
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                onClicked: root.mergeDraft({ allowUnknownApps: true })
+              }
+
+              Button {
+                width: (parent.width - Style.space(12)) / 3
+                text: "Block"
+                selected: root.draft && root.draft.allowUnknownApps === false
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                onClicked: root.mergeDraft({ allowUnknownApps: false })
+              }
             }
           }
 
@@ -500,6 +911,16 @@ Panel {
             text: "Mute these apps"
             fontFamily: root.fontFamily
             foreground: root.foreground
+          }
+
+          Text {
+            width: parent.width
+            visible: root.seenApps.length > 0
+            text: "Every app that has ever sent a notification on this machine, so you can pick from real names instead of typing one."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           // Apps that have never sent anything cannot be listed, and typing a
@@ -517,18 +938,23 @@ Panel {
           Repeater {
             model: root.seenApps
 
-            delegate: Item {
+            delegate: Rectangle {
               required property var modelData
               width: content.width
-              height: Style.space(34)
+              height: Style.space(36)
+              radius: Style.spacing.labelGap
+              color: rowHover.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
               // A profile that silences everything has nothing per-app left
               // to decide, so the rows go quiet rather than lying.
-              opacity: root.editing && root.editing.dndAll ? 0.4 : 1.0
+              opacity: root.draft && root.draft.dndAll ? 0.4 : 1.0
+
+              HoverHandler { id: rowHover }
 
               Text {
                 anchors.left: parent.left
-                anchors.right: appSwitch.left
-                anchors.rightMargin: Style.space(10)
+                anchors.leftMargin: Style.space(6)
+                anchors.right: forgetAppBg.left
+                anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 text: modelData
                 color: root.foreground
@@ -537,27 +963,93 @@ Panel {
                 elide: Text.ElideRight
               }
 
+              // Untracks the app entirely (also ages out after 30 days on
+              // its own) — separate from the mute switch, which only ever
+              // acts on an app still being tracked.
+              Rectangle {
+                id: forgetAppBg
+                width: Style.space(22)
+                height: Style.space(22)
+                radius: width / 2
+                anchors.right: appSwitch.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                color: forgetAppMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+                Text {
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: "󰅖"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                MouseArea {
+                  id: forgetAppMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.forgetSeenApp(modelData)
+                }
+              }
+
               ToggleSwitch {
                 id: appSwitch
                 anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
                 foreground: root.foreground
-                enabled: !(root.editing && root.editing.dndAll)
-                checked: root.isMuted(root.editing, modelData)
-                onToggled: root.toggleMute(root.editingName, modelData, !checked)
+                enabled: !(root.draft && root.draft.dndAll)
+                checked: root.draftMuted(modelData)
+                onToggled: root.setDraftMuted(modelData, !checked)
               }
             }
           }
 
           PanelSeparator { width: parent.width }
 
-          Button {
+          // New profile: Cancel / Create. Existing profile: Delete / Cancel
+          // / Save — delete stays its own button since it acts immediately
+          // (no "cancel" undoes a delete), the other two are the draft's.
+          Row {
             width: parent.width
-            visible: root.profiles.length > 1
-            text: "Delete this profile"
-            fontFamily: root.fontFamily
-            foreground: bar ? bar.urgent : Color.urgent
-            onClicked: root.deleteProfile(root.editingName)
+            spacing: Style.space(8)
+
+            // Delete is unavailable for a new (unsaved) draft — nothing to
+            // delete yet — and for the protected default profile, which can
+            // only be edited. Either way Cancel/Save split the row in two
+            // instead of three.
+            readonly property bool showDelete: !root.draftIsNew && root.editingName !== root.defaultProfileName
+            readonly property real buttonWidth: showDelete
+              ? (width - Style.space(16)) / 3
+              : (width - Style.space(8)) / 2
+
+            Button {
+              width: parent.buttonWidth
+              visible: parent.showDelete
+              text: "Delete"
+              fontFamily: root.fontFamily
+              foreground: bar ? bar.urgent : Color.urgent
+              enabled: root.profiles.length > 1
+              onClicked: root.deleteProfile(root.editingName)
+            }
+
+            Button {
+              width: parent.buttonWidth
+              text: "Cancel"
+              fontFamily: root.fontFamily
+              foreground: root.foreground
+              onClicked: root.closeEditor()
+            }
+
+            Button {
+              width: parent.buttonWidth
+              text: root.draftIsNew ? "Create" : "Save"
+              fontFamily: root.fontFamily
+              foreground: root.foreground
+              onClicked: root.saveDraft()
+            }
           }
         }
 
@@ -566,7 +1058,7 @@ Panel {
 
         Column {
           width: parent.width
-          spacing: Style.space(8)
+          spacing: Style.space(10)
           visible: root.view !== "editor"
 
           Item {
@@ -617,66 +1109,173 @@ Panel {
           Repeater {
             model: root.historyRows
 
-            delegate: Column {
+            // A quieter sibling of the live toast card: same background/
+            // border tokens and corner radius as NotificationCard.qml, so an
+            // entry doesn't change visual language on its way into history.
+            delegate: BorderSurface {
+              id: historyRow
               required property var modelData
+              readonly property string stem: String(modelData.timestamp || 0) + "-" + String(modelData.originalId || 0)
               width: content.width
-              spacing: Style.space(2)
+              implicitHeight: cardBody.implicitHeight + topPadding + bottomPadding
+              radius: Style.cornerRadius
+              color: Color.notifications.background
+              borderSpec: Border.surfaceSpec("notifications", "border", Color.notifications.border, Math.max(1, Style.space(1)))
+              padding: Style.space(10)
 
-              Item {
-                width: parent.width
-                implicitHeight: Math.max(appText.implicitHeight, timeText.implicitHeight)
+              Column {
+                id: cardBody
+                x: parent.leftPadding
+                y: parent.topPadding
+                width: parent.width - parent.leftPadding - parent.rightPadding
+                spacing: Style.space(4)
 
-                Text {
-                  id: appText
-                  textFormat: Text.PlainText
-                  anchors.left: parent.left
-                  anchors.right: timeText.left
-                  anchors.rightMargin: Style.space(8)
-                  text: modelData.app || "Unknown"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                  elide: Text.ElideRight
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(appIconBg.height, appText.implicitHeight, removeButtonBg.height)
+
+                  Rectangle {
+                    id: appIconBg
+                    visible: appIconImage.visible
+                    width: Style.space(22)
+                    height: Style.space(22)
+                    radius: Style.spacing.labelGap
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Style.normalFillFor(root.foreground, Color.accent)
+
+                    Image {
+                      id: appIconImage
+                      readonly property string src: root.iconSource(historyRow.modelData.appIcon)
+                      visible: src !== "" && status === Image.Ready
+                      source: src
+                      anchors.fill: parent
+                      anchors.margins: Style.space(3)
+                      fillMode: Image.PreserveAspectFit
+                      asynchronous: true
+                    }
+                  }
+
+                  Text {
+                    id: appText
+                    textFormat: Text.PlainText
+                    anchors.left: appIconImage.visible ? appIconBg.right : parent.left
+                    anchors.leftMargin: appIconImage.visible ? Style.space(8) : 0
+                    anchors.right: timeText.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: historyRow.modelData.app || "Unknown"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    id: timeText
+                    textFormat: Text.PlainText
+                    anchors.right: removeButtonBg.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.relativeTime(historyRow.modelData.timestamp)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  // A real button, not sharing space with the row's click
+                  // area below — the two used to overlap as parent/child
+                  // MouseAreas, which was unreliable about which one a click
+                  // actually landed on. A plain glyph + MouseArea, same
+                  // shape as the profile chips above, rather than
+                  // BarIconButton — it doesn't expose a hover state to paint
+                  // the circle from.
+                  Rectangle {
+                    id: removeButtonBg
+                    width: Style.space(24)
+                    height: Style.space(24)
+                    radius: width / 2
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: removeMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.centerIn: parent
+                      text: "󰅖"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    MouseArea {
+                      id: removeMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var stem = historyRow.stem
+                        root.run(["removeHistoryEntry", stem])
+                        // Filtered by stem, not object identity: a Repeater's
+                        // modelData for a plain-array model is a value handed
+                        // to the delegate, not a live reference back into
+                        // root.historyRows, so `r !== historyRow.modelData`
+                        // never matched and the row never actually left.
+                        root.historyRows = root.historyRows.filter(function(r) {
+                          return (String(r.timestamp || 0) + "-" + String(r.originalId || 0)) !== stem
+                        })
+                      }
+                    }
+                  }
                 }
 
-                Text {
-                  id: timeText
-                  textFormat: Text.PlainText
-                  anchors.right: parent.right
-                  text: root.relativeTime(modelData.timestamp)
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                // Archived entries carry no live action to replay (the
+                // sender's Notification object is long gone) — focusing the
+                // app by name is the same fallback invokePopupDefault uses
+                // for chat apps that never registered a "default" action.
+                // Its own row below the header, not overlapping the delete
+                // button above.
+                MouseArea {
+                  width: parent.width
+                  height: bodyColumn.implicitHeight
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.run(["focusHistoryApp", historyRow.modelData.app || "", historyRow.modelData.body || ""])
+
+                  Column {
+                  id: bodyColumn
+                  width: parent.width
+                  spacing: Style.space(2)
+
+                  Text {
+                    width: parent.width
+                    visible: (historyRow.modelData.summary || "") !== ""
+                    text: historyRow.modelData.summary || ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    visible: (historyRow.modelData.body || "") !== ""
+                    text: historyRow.modelData.body || ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                    maximumLineCount: 2
+                    wrapMode: Text.WordWrap
+                  }
+                  }
                 }
               }
-
-              Text {
-                width: parent.width
-                visible: (modelData.summary || "") !== ""
-                text: modelData.summary || ""
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
-
-              Text {
-                width: parent.width
-                visible: (modelData.body || "") !== ""
-                text: modelData.body || ""
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-                maximumLineCount: 2
-                wrapMode: Text.WordWrap
-              }
-
-              PanelSeparator { width: parent.width }
             }
           }
         }
+      }
       }
     }
   }
