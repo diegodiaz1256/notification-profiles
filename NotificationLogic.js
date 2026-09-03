@@ -115,6 +115,20 @@ function bodyLinkUrl(body) {
   return ""
 }
 
+// The host out of a URL, for matching against a --app= webapp's window
+// class: Brave (and Chromium generally) names that class after the site's
+// own host — "brave-web.whatsapp.com__-Default" for web.whatsapp.com — so a
+// notification whose app_name is the browser's own identity (a webapp gets
+// no distinguishing D-Bus identity of its own; see effectiveAppName) can
+// still be traced to its own window through the URL its body already
+// carries.
+function urlHost(url) {
+  var match = String(url || "").match(/^https?:\/\/([^\/?#]+)/i)
+  if (!match) return ""
+  // Strip a port and a leading "www." — a window class carries neither.
+  return match[1].replace(/:\d+$/, "").replace(/^www\./i, "")
+}
+
 function summaryStartsWithGlyph(summary) {
   var text = String(summary || "").replace(/^\s+/, "")
   if (!text) return false
@@ -798,6 +812,7 @@ if (typeof module !== "undefined") {
     isChromiumDerived: isChromiumDerived,
     sanitizeBody: sanitizeBody,
     bodyLinkUrl: bodyLinkUrl,
+    urlHost: urlHost,
     styledBody: styledBody,
     summaryStartsWithGlyph: summaryStartsWithGlyph,
     shouldBypassDnd: shouldBypassDnd,

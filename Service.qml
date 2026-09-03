@@ -775,37 +775,60 @@ Item {
   // xdg-open on an http(s) URL hands it to the default browser, which
   // reuses an existing tab for that origin rather than opening a new one
   // when the site is already loaded there.
-  // Window focus goes first: an app that's already running (WhatsApp and
-  // any other installed --app= webapp, plus every non-browser app) has one
-  // exact place a click should land, and opening its notification's URL
-  // instead would launch a second, disconnected window even though the
-  // right one is already open. The URL is the fallback for a site that
-  // isn't running as its own window at all — a plain tab or a site that was
-  // closed — where there's nothing to focus and opening it is the closest
-  // thing to "take me there" available.
+  // Window focus goes first, tried most-specific-first, before ever
+  // falling back to opening the notification's URL:
+  //
+  //   1. By the host in the notification's own URL, when there is one.
+  //      Chromium names a --app=<url> webapp's window class after the
+  //      site's own host ("brave-web.whatsapp.com__-Default" for
+  //      web.whatsapp.com), which the body's URL already carries — and
+  //      this has to come FIRST, not as a fallback, because the webapp's
+  //      app_name is USELESS for finding it: Brave reports its own shared
+  //      identity ("brave-origin") for every window, webapp or plain
+  //      browsing tab alike, so an app_name match against "brave-origin"
+  //      would happily focus an unrelated Brave window that happened to
+  //      match first and never even try the host.
+  //   2. By app_name, when there's no URL (or the host didn't match
+  //      anything) — the normal case for every non-browser app.
+  //
+  // Only once both fail — nothing running matches either — does opening
+  // the URL make sense: there's no existing window to send the click to,
+  // so a fresh one is the closest thing to "take me there" available.
   function focusApp(entry) {
     if (!entry || !entry.app) return
+    var host = NotificationLogic.urlHost(NotificationLogic.bodyLinkUrl(entry.body))
     focusAppProc.entry = entry
+    focusAppProc.triedAppName = false
     focusAppProc.command = [
       service.omarchyPath + "/bin/omarchy-hyprland-focus-app",
-      String(entry.app)
+      host || String(entry.app)
     ]
+    if (!host) focusAppProc.triedAppName = true
     focusAppProc.running = true
   }
 
   Process {
     id: focusAppProc
     property var entry: null
+    property bool triedAppName: false
     running: false
     onExited: function(exitCode) {
-      // No window matched — fall back to the notification's own URL, if it
-      // had one.
-      if (exitCode !== 0) {
-        var url = NotificationLogic.bodyLinkUrl(focusAppProc.entry ? focusAppProc.entry.body : "")
-        if (url) {
-          openUrlProc.command = ["xdg-open", url]
-          openUrlProc.running = true
-        }
+      if (exitCode === 0) { focusAppProc.entry = null; return }
+
+      if (!focusAppProc.triedAppName) {
+        focusAppProc.triedAppName = true
+        focusAppProc.command = [
+          service.omarchyPath + "/bin/omarchy-hyprland-focus-app",
+          String(focusAppProc.entry.app)
+        ]
+        focusAppProc.running = true
+        return
+      }
+
+      var url = NotificationLogic.bodyLinkUrl(focusAppProc.entry ? focusAppProc.entry.body : "")
+      if (url) {
+        openUrlProc.command = ["xdg-open", url]
+        openUrlProc.running = true
       }
       focusAppProc.entry = null
     }
