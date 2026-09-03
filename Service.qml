@@ -100,19 +100,6 @@ Item {
   property var seenApps: []
   readonly property var seenAppNames: seenApps.map(function(e) { return e.name })
 
-  // When false, an app that has never been seen before is silenced by
-  // default (still recorded and lands in history, same treatment a muted
-  // app gets) until the user opts it in — the reverse of the normal
-  // per-profile model, which only ever mutes apps you already know about.
-  // True (the default) keeps today's behavior: anything gets through unless
-  // a profile says otherwise.
-  property bool allowUnknownApps: true
-
-  function setAllowUnknownApps(value) {
-    service.allowUnknownApps = !!value
-    service.scheduleSettingsSave()
-  }
-
   // Apps whose toast stays on screen instead of auto-dismissing, by
   // default. A profile can override this per-app in either direction (see
   // NotificationLogic.isAppImportant) — this is only the fallback for an
@@ -164,7 +151,7 @@ Item {
     if (!NotificationLogic.findProfile(incoming, service.defaultProfileName)) {
       var restored = NotificationLogic.findProfile(service.profiles, service.defaultProfileName)
       incoming = incoming.concat([restored || {
-        name: service.defaultProfileName, icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null,
+        name: service.defaultProfileName, icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: true,
         importantOverrideOn: [], importantOverrideOff: []
       }])
     }
@@ -271,8 +258,11 @@ Item {
     return true
   }
 
-  // value is true/false to override the global setting for this profile, or
-  // null to go back to inheriting it.
+  // Plain per-profile boolean — true allows a first-time sender through
+  // normally, false silences it (see the wasUnknownApp handling in
+  // handleNotification). No global fallback: every profile already decides
+  // this for itself, so a separate global default only ever mattered for a
+  // profile left on "inherit", which wasn't worth the extra state.
   function setProfileAllowUnknownApps(profileName, value) {
     var next = []
     var found = false
@@ -281,7 +271,7 @@ Item {
       if (p.name !== String(profileName || "")) { next.push(p); continue }
       found = true
       next.push({
-        name: p.name, icon: p.icon, muteApps: p.muteApps, dndAll: p.dndAll, allowUnknownApps: value,
+        name: p.name, icon: p.icon, muteApps: p.muteApps, dndAll: p.dndAll, allowUnknownApps: !!value,
         importantOverrideOn: p.importantOverrideOn, importantOverrideOff: p.importantOverrideOff
       })
     }
@@ -498,11 +488,12 @@ Item {
     // Checked before recordSeenApp — that call is what makes the app known,
     // so the check has to run against the state from before this very
     // notification, or an app could never be "unknown" by the time it's
-    // asked about. A profile's own allowUnknownApps overrides the global
-    // default when set; null means "use the global".
-    var effectiveAllowUnknown = service.activeProfile && service.activeProfile.allowUnknownApps !== null
+    // asked about. Plain per-profile boolean — every profile can already set
+    // its own Allow/Block, so a separate global default only mattered for a
+    // profile left on "inherit", which wasn't worth the extra state.
+    var effectiveAllowUnknown = service.activeProfile && typeof service.activeProfile.allowUnknownApps === "boolean"
       ? service.activeProfile.allowUnknownApps
-      : service.allowUnknownApps
+      : true
     var wasUnknownApp = !effectiveAllowUnknown &&
       NotificationLogic.findSeenApp(service.seenApps, notification.appName) === null
     service.recordSeenApp(notification.appName)
@@ -1216,7 +1207,6 @@ Item {
     if (parsed.profiles && parsed.profiles.length) service.profiles = parsed.profiles
     if (parsed.activeProfile) service.activeProfileName = parsed.activeProfile
     if (parsed.seenApps) service.seenApps = parsed.seenApps
-    if (parsed.allowUnknownApps !== null) service.allowUnknownApps = parsed.allowUnknownApps
     if (parsed.importantApps) service.importantApps = parsed.importantApps
 
     service.settingsLoaded = true
@@ -1237,12 +1227,16 @@ Item {
 
   function flushSettings() {
     settingsFile.setText(JSON.stringify({
-      version: 6,
+      // 7: allowUnknownApps moved from a top-level global (with each profile
+      // able to null-inherit it) to a plain boolean living only on each
+      // profile — every profile already set its own Allow/Block, so the
+      // global default only mattered for a profile left on "inherit", which
+      // wasn't worth the extra state. Deliberate simplification, not a bug.
+      version: 7,
       dnd: persisted.doNotDisturb,
       activeProfile: service.activeProfileName,
       profiles: service.profiles,
       seenApps: service.seenApps,
-      allowUnknownApps: service.allowUnknownApps,
       importantApps: service.importantApps
     }, null, 2) + "\n")
   }
@@ -1364,7 +1358,6 @@ Item {
         active: service.activeProfileName,
         profiles: service.profiles,
         seenApps: service.seenAppNames,
-        allowUnknownApps: service.allowUnknownApps,
         importantApps: service.importantApps
       })
     }
@@ -1407,12 +1400,12 @@ Item {
       return service.setAppMuted(profileName, appName, false) ? "ok" : "unknown"
     }
 
-    // value: "true" / "false" to override the global allowUnknownApps for
-    // this profile, "inherit" (or anything else) to go back to the global.
+    // Plain per-profile boolean now — "true" allows a first-time sender
+    // through in this profile, anything else blocks it.
     function setProfileAllowUnknownApps(profileName: string, value: string): string {
       var v = String(value || "").toLowerCase()
-      var stored = v === "true" ? true : (v === "false" ? false : null)
-      return service.setProfileAllowUnknownApps(profileName, stored) ? "ok" : "unknown"
+      var allow = v === "true" || v === "1" || v === "on" || v === "yes"
+      return service.setProfileAllowUnknownApps(profileName, allow) ? "ok" : "unknown"
     }
 
     // Whether an app's toast stays on screen by default, absent a profile
@@ -1445,16 +1438,6 @@ Item {
     function trackApp(appName: string): string {
       service.trackApp(appName)
       return "ok"
-    }
-
-    function allowUnknownApps(): string {
-      return service.allowUnknownApps ? "true" : "false"
-    }
-
-    function setAllowUnknownApps(value: string): string {
-      var v = String(value || "").toLowerCase()
-      service.setAllowUnknownApps(v === "true" || v === "1" || v === "on" || v === "yes")
-      return service.allowUnknownApps ? "true" : "false"
     }
 
     function ping(): string { return "ok" }

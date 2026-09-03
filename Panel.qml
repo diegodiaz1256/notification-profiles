@@ -22,7 +22,6 @@ Panel {
   property var profiles: []
   property string activeName: ""
   property var seenApps: []
-  property bool allowUnknownApps: true
   property var importantApps: []
 
   // Which profile the editor is showing. Empty means the switcher list.
@@ -95,12 +94,12 @@ Panel {
       icon: profile.icon || "",
       muteApps: (profile.muteApps || []).slice(),
       dndAll: !!profile.dndAll,
-      // null inherits the global "allow unknown apps" setting; a boolean
-      // overrides it just for this profile.
-      allowUnknownApps: typeof profile.allowUnknownApps === "boolean" ? profile.allowUnknownApps : null,
+      // Plain per-profile boolean, defaulting true (allow) for a profile
+      // that has never touched it.
+      allowUnknownApps: typeof profile.allowUnknownApps === "boolean" ? profile.allowUnknownApps : true,
       // Per-app "keep this app's toast on screen" override for this
-      // profile, same inherit/on/off shape as allowUnknownApps but keyed
-      // per app instead of a single value.
+      // profile, an inherit/on/off shape keyed per app instead of a single
+      // value — this one is unrelated to allowUnknownApps.
       importantOverrideOn: (profile.importantOverrideOn || []).slice(),
       importantOverrideOff: (profile.importantOverrideOff || []).slice()
     }
@@ -114,6 +113,21 @@ Panel {
     root.draft = null
     root.editingName = ""
     root.iconPickerOpen = false
+    root.view = "switcher"
+  }
+
+  // The global-apps screen has no draft to discard — just a plain nav back,
+  // kept as its own function so a future addition to closeEditor's cleanup
+  // doesn't silently start running for this screen too.
+  function openGlobalApps() {
+    root.appPickerOpen = false
+    root.appPickerQuery = ""
+    root.view = "globalApps"
+  }
+
+  function closeGlobalApps() {
+    root.appPickerOpen = false
+    root.appPickerQuery = ""
     root.view = "switcher"
   }
 
@@ -264,13 +278,7 @@ Panel {
     root.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : []
     root.activeName = String(parsed.active || "")
     root.seenApps = Array.isArray(parsed.seenApps) ? parsed.seenApps : []
-    if (typeof parsed.allowUnknownApps === "boolean") root.allowUnknownApps = parsed.allowUnknownApps
     if (Array.isArray(parsed.importantApps)) root.importantApps = parsed.importantApps
-  }
-
-  function setAllowUnknownApps(value) {
-    root.allowUnknownApps = value
-    run(["setAllowUnknownApps", value ? "true" : "false"])
   }
 
   function isImportantApp(app) {
@@ -488,9 +496,10 @@ Panel {
       id: keys
       anchors.fill: parent
       onCloseRequested: {
-        // Escape backs out of the editor (discarding the draft) first, then
-        // closes the panel.
-        if (root.view !== "switcher") root.closeEditor()
+        // Escape backs out of the editor (discarding the draft) or the
+        // global-apps screen first, then closes the panel.
+        if (root.view === "editor") root.closeEditor()
+        else if (root.view === "globalApps") root.closeGlobalApps()
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -502,13 +511,58 @@ Panel {
         id: profileStrip
         width: parent.width
         spacing: Style.space(6)
-        visible: root.view !== "editor"
+        visible: root.view === "switcher"
 
-        PanelSectionHeader {
+        Item {
           width: parent.width
-          text: "Notification profile"
-          fontFamily: root.fontFamily
-          foreground: root.foreground
+          implicitHeight: Math.max(profileHeader.implicitHeight, globalAppsButton.height)
+
+          PanelSectionHeader {
+            id: profileHeader
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Notification profile"
+            fontFamily: root.fontFamily
+            foreground: root.foreground
+          }
+
+          // Reach-anywhere entry to the global (not-per-profile) app
+          // settings — the master Important toggle, the "allow unknown
+          // apps" default, and the add-app picker. Those used to live only
+          // inside a specific profile's editor, which read as if they were
+          // scoped to that one profile when they apply everywhere.
+          Rectangle {
+            id: globalAppsButton
+            width: Style.space(26)
+            height: Style.space(26)
+            radius: width / 2
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            color: globalAppsMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+            Text {
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              text: "󰒓"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            MouseArea {
+              id: globalAppsMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.openGlobalApps()
+
+              PanelToolTip {
+                visible: globalAppsMouse.containsMouse
+                text: "Global app settings — applies across every profile"
+                fontFamily: root.fontFamily
+              }
+            }
+          }
         }
 
         // One profile chip's visuals + behavior, shared between the two
@@ -692,50 +746,6 @@ Panel {
           }
 
           Loader { sourceComponent: addChipComponent }
-        }
-
-        Item {
-          width: parent.width
-          implicitHeight: Math.max(unknownAppsLabel.implicitHeight, unknownAppsSwitch.implicitHeight)
-
-          Column {
-            id: unknownAppsLabel
-            anchors.left: parent.left
-            anchors.right: unknownAppsSwitch.left
-            anchors.rightMargin: Style.space(10)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(1)
-
-            Text {
-              text: "Allow apps you haven't seen before"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-              width: parent.width
-            }
-
-            Text {
-              text: root.allowUnknownApps
-                ? "On. A first-time sender shows normally."
-                : "Off. A first-time sender is silenced (still recorded below) until it's sent once and appears in the app list."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-              wrapMode: Text.WordWrap
-              width: parent.width
-            }
-          }
-
-          ToggleSwitch {
-            id: unknownAppsSwitch
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            foreground: root.foreground
-            checked: root.allowUnknownApps
-            onToggled: root.setAllowUnknownApps(!root.allowUnknownApps)
-          }
         }
 
         PanelSeparator { width: parent.width }
@@ -948,58 +958,47 @@ Panel {
             }
           }
 
-          Column {
+          Item {
             width: parent.width
-            spacing: Style.space(6)
+            implicitHeight: Math.max(unknownAppsDraftLabel.implicitHeight, unknownAppsDraftSwitch.implicitHeight)
 
-            Text {
-              text: "Apps you haven't seen before"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              elide: Text.ElideRight
-              width: parent.width
+            Column {
+              id: unknownAppsDraftLabel
+              anchors.left: parent.left
+              anchors.right: unknownAppsDraftSwitch.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(1)
+
+              Text {
+                text: "Apps you haven't seen before"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+                width: parent.width
+              }
+
+              Text {
+                text: root.draft && root.draft.allowUnknownApps
+                  ? "On. A first-time sender shows normally in this profile."
+                  : "Off. A first-time sender is silenced in this profile (still recorded below) until it's sent once."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                wrapMode: Text.WordWrap
+                width: parent.width
+              }
             }
 
-            Text {
-              text: "Overrides the global setting just for this profile."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-              width: parent.width
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(6)
-
-              Button {
-                width: (parent.width - Style.space(12)) / 3
-                text: "Use global"
-                selected: root.draft && root.draft.allowUnknownApps === null
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                onClicked: root.mergeDraft({ allowUnknownApps: null })
-              }
-
-              Button {
-                width: (parent.width - Style.space(12)) / 3
-                text: "Allow"
-                selected: root.draft && root.draft.allowUnknownApps === true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                onClicked: root.mergeDraft({ allowUnknownApps: true })
-              }
-
-              Button {
-                width: (parent.width - Style.space(12)) / 3
-                text: "Block"
-                selected: root.draft && root.draft.allowUnknownApps === false
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                onClicked: root.mergeDraft({ allowUnknownApps: false })
-              }
+            ToggleSwitch {
+              id: unknownAppsDraftSwitch
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              foreground: root.foreground
+              checked: root.draft ? !!root.draft.allowUnknownApps : true
+              onToggled: root.mergeDraft({ allowUnknownApps: !root.draft.allowUnknownApps })
             }
           }
 
@@ -1007,7 +1006,7 @@ Panel {
 
           Item {
             width: parent.width
-            implicitHeight: Math.max(muteHeader.implicitHeight, addAppButton.height)
+            implicitHeight: Math.max(muteHeader.implicitHeight, openGlobalAppsFromEditor.height)
 
             PanelSectionHeader {
               id: muteHeader
@@ -1018,125 +1017,50 @@ Panel {
               foreground: root.foreground
             }
 
+            // Adding an app to the tracked list, and the master Important
+            // toggle, are global settings — moved off this profile-scoped
+            // screen entirely so they stop reading as if they only applied
+            // here. This just links over to where they actually live.
             Rectangle {
-              id: addAppButton
-              width: Style.space(90)
+              id: openGlobalAppsFromEditor
+              width: Style.space(120)
               height: Style.space(26)
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               radius: Style.spacing.labelGap
-              color: addAppMouse.containsMouse
-                ? Style.hoverFillFor(root.foreground, Color.accent)
-                : (root.appPickerOpen ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
-              border.width: root.appPickerOpen ? 0 : 1
+              color: openGlobalAppsFromEditorMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+              border.width: 1
               border.color: Qt.darker(root.foreground, 2.2)
 
               Text {
                 anchors.centerIn: parent
                 textFormat: Text.PlainText
-                text: "+ Add app"
-                color: root.appPickerOpen ? root.foreground : root.dim
+                text: "Add / track app"
+                color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
 
               MouseArea {
-                id: addAppMouse
+                id: openGlobalAppsFromEditorMouse
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  root.appPickerOpen = !root.appPickerOpen
-                  if (!root.appPickerOpen) root.appPickerQuery = ""
+                onClicked: root.openGlobalApps()
+
+                PanelToolTip {
+                  visible: openGlobalAppsFromEditorMouse.containsMouse
+                  text: "Opens global app settings — the same screen for every profile"
+                  fontFamily: root.fontFamily
                 }
               }
             }
-          }
-
-          // Search installed apps and add one ahead of it ever notifying, so
-          // its rules can be set up in advance — see root.addTrackedApp.
-          Column {
-            width: parent.width
-            spacing: Style.space(6)
-            visible: root.appPickerOpen
-
-            TextField {
-              id: appPickerField
-              width: parent.width
-              foreground: root.foreground
-              placeholderText: "Search installed apps"
-              text: root.appPickerQuery
-              onTextChanged: root.appPickerQuery = text
-              Component.onCompleted: forceActiveFocus()
-            }
-
-            Text {
-              width: parent.width
-              visible: root.appPickerResults.length === 0
-              text: root.appPickerQuery.trim()
-                ? "No installed app matches, or it's already tracked."
-                : "Type to search, or browse installed apps."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Repeater {
-              model: root.appPickerResults
-
-              delegate: Rectangle {
-                required property var modelData
-                width: parent ? parent.width : 0
-                height: Style.space(36)
-                radius: Style.spacing.labelGap
-                color: resultMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
-
-                Image {
-                  id: resultIcon
-                  readonly property string src: root.iconSource(modelData.icon)
-                  visible: src !== "" && status === Image.Ready
-                  source: src
-                  width: Style.space(20)
-                  height: Style.space(20)
-                  anchors.left: parent.left
-                  anchors.leftMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  fillMode: Image.PreserveAspectFit
-                  asynchronous: true
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  anchors.left: resultIcon.visible ? resultIcon.right : parent.left
-                  anchors.leftMargin: resultIcon.visible ? Style.space(8) : Style.space(8)
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: modelData.name
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                }
-
-                MouseArea {
-                  id: resultMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.addTrackedApp(modelData.name)
-                }
-              }
-            }
-
-            PanelSeparator { width: parent.width }
           }
 
           Text {
             width: parent.width
             visible: root.seenApps.length > 0
-            text: "Every app that has ever sent a notification, plus any you've added above."
+            text: "Every app that has ever sent a notification, plus any you've added in global app settings."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1144,11 +1068,11 @@ Panel {
           }
 
           // Apps that have never sent anything, and haven't been added from
-          // the picker above, have no real name to show a rule for yet.
+          // the global picker, have no real name to show a rule for yet.
           Text {
             width: parent.width
             visible: root.seenApps.length === 0
-            text: "No apps tracked yet. They appear here once they notify you, or once you add one above."
+            text: "No apps tracked yet. They appear here once they notify you, or once you add one from global app settings."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1162,7 +1086,7 @@ Panel {
               id: seenAppRow
               required property var modelData
               width: content.width
-              height: Style.space(64)
+              height: Style.space(68)
               radius: Style.spacing.labelGap
               color: rowHover.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
               // A profile that silences everything has nothing per-app left
@@ -1229,100 +1153,86 @@ Panel {
                 onToggled: root.setDraftMuted(seenAppRow.modelData, !checked)
               }
 
-              // Second line: the global "keep this app's toast up" default,
-              // and this profile's own override of it — Inherit reads the
-              // global column to its left, Important/Normal ignore it.
-              Row {
+              // This profile's override of the global "keep its toast on
+              // screen" default (set in global app settings, reached via
+              // the gear icon / "Add / track app" above) — Inherit follows
+              // that global switch, On/Off pin it just for this profile.
+              Column {
                 anchors.left: parent.left
                 anchors.leftMargin: Style.space(6)
                 anchors.right: parent.right
                 anchors.rightMargin: Style.space(6)
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: Style.space(6)
-                spacing: Style.space(6)
+                spacing: Style.space(4)
 
-                Rectangle {
-                  id: importantGlobalBg
-                  width: Style.space(84)
-                  height: Style.space(22)
-                  radius: Style.spacing.labelGap
-                  color: importantGlobalMouse.containsMouse
-                    ? Style.hoverFillFor(root.foreground, Color.accent)
-                    : (root.isImportantApp(seenAppRow.modelData) ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
-                  border.width: root.isImportantApp(seenAppRow.modelData) ? 0 : 1
-                  border.color: Qt.darker(root.foreground, 2.2)
+                Column {
+                  width: parent.width
+                  spacing: Style.space(3)
 
+                  // The label alone doesn't fit next to a full-width
+                  // tri-state row at this panel width — stacked, like every
+                  // other label+control pair in this editor (Silence
+                  // everything, Apps you haven't seen before), rather than
+                  // squeezed onto one line where the two collided.
                   Text {
-                    anchors.centerIn: parent
+                    id: overrideLabel
                     textFormat: Text.PlainText
-                    text: "Important"
-                    color: root.isImportantApp(seenAppRow.modelData) ? root.foreground : root.dim
+                    text: "Keep its toast up in this profile"
+                    color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                    width: parent.width
                   }
 
-                  MouseArea {
-                    id: importantGlobalMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.setImportantApp(seenAppRow.modelData, !root.isImportantApp(seenAppRow.modelData))
+                  Row {
+                    width: parent.width
+                    height: Style.space(22)
+                    spacing: Style.space(4)
 
-                    PanelToolTip {
-                      visible: importantGlobalMouse.containsMouse
-                      text: "Keep this app's toast on screen by default"
-                      fontFamily: root.fontFamily
-                    }
-                  }
-                }
+                    Repeater {
+                      model: [
+                        { label: "Inherit", value: null },
+                        { label: "On", value: true },
+                        { label: "Off", value: false }
+                      ]
 
-                // This profile's override of the column to the left —
-                // Inherit/On/Off, same tri-state shape as the profile-wide
-                // allowUnknownApps control above.
-                Row {
-                  width: parent.width - importantGlobalBg.width - Style.space(6)
-                  height: Style.space(22)
-                  spacing: Style.space(4)
+                      delegate: Rectangle {
+                        required property var modelData
+                        readonly property bool isSelected: root.draftImportantOverride(seenAppRow.modelData) === modelData.value
+                        width: (parent.width - Style.space(8)) / 3
+                        height: parent.height
+                        radius: Style.spacing.labelGap
+                        color: overrideMouse.containsMouse
+                          ? Style.hoverFillFor(root.foreground, Color.accent)
+                          : (isSelected ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                        border.width: isSelected ? 0 : 1
+                        border.color: Qt.darker(root.foreground, 2.2)
 
-                  Repeater {
-                    model: [
-                      { label: "Inherit", value: null },
-                      { label: "On", value: true },
-                      { label: "Off", value: false }
-                    ]
+                        Text {
+                          anchors.centerIn: parent
+                          textFormat: Text.PlainText
+                          text: modelData.label
+                          color: parent.isSelected ? root.foreground : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
 
-                    delegate: Rectangle {
-                      required property var modelData
-                      readonly property bool isSelected: root.draftImportantOverride(seenAppRow.modelData) === modelData.value
-                      width: (parent.width - Style.space(8)) / 3
-                      height: parent.height
-                      radius: Style.spacing.labelGap
-                      color: overrideMouse.containsMouse
-                        ? Style.hoverFillFor(root.foreground, Color.accent)
-                        : (isSelected ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
-                      border.width: isSelected ? 0 : 1
-                      border.color: Qt.darker(root.foreground, 2.2)
+                        MouseArea {
+                          id: overrideMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.setDraftImportantOverride(seenAppRow.modelData, modelData.value)
 
-                      Text {
-                        anchors.centerIn: parent
-                        textFormat: Text.PlainText
-                        text: modelData.label
-                        color: parent.isSelected ? root.foreground : root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
-                      }
-
-                      MouseArea {
-                        id: overrideMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.setDraftImportantOverride(seenAppRow.modelData, modelData.value)
-
-                        PanelToolTip {
-                          visible: overrideMouse.containsMouse
-                          text: "This profile's override — Inherit follows the global switch on the left"
-                          fontFamily: root.fontFamily
+                          PanelToolTip {
+                            visible: overrideMouse.containsMouse
+                            text: modelData.value === null
+                              ? "Follow the global default"
+                              : (modelData.value ? "Toast stays up in this profile, even if the global default is off" : "Toast dismisses normally in this profile, even if the global default is on")
+                            fontFamily: root.fontFamily
+                          }
                         }
                       }
                     }
@@ -1378,13 +1288,281 @@ Panel {
           }
         }
 
+        // ---------- global app settings: reachable from the gear icon in
+        // the switcher, or "Add / track app" in any profile's editor. Only
+        // the settings that actually apply everywhere live here — the
+        // master Important toggle, the "allow unknown apps" default, and
+        // the add-app picker. Mute rules and per-profile overrides stay in
+        // the profile editor, since those genuinely differ per profile. ----------
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+          visible: root.view === "globalApps"
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(globalBackButton.height, globalTitle.implicitHeight)
+
+            BarIconButton {
+              id: globalBackButton
+              bar: root.bar
+              width: Style.space(30)
+              height: Style.space(30)
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "󰅁"
+              onPressed: function(b) { root.closeGlobalApps() }
+            }
+
+            Text {
+              id: globalTitle
+              anchors.left: globalBackButton.right
+              anchors.leftMargin: Style.space(8)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Global app settings"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              elide: Text.ElideRight
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: "Whether a first-time sender is allowed through is set per profile, in that profile's own editor — nothing global to set here."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { width: parent.width }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(trackedHeader.implicitHeight, globalAddAppButton.height)
+
+            PanelSectionHeader {
+              id: trackedHeader
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Tracked apps"
+              fontFamily: root.fontFamily
+              foreground: root.foreground
+            }
+
+            Rectangle {
+              id: globalAddAppButton
+              width: Style.space(90)
+              height: Style.space(26)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.spacing.labelGap
+              color: globalAddAppMouse.containsMouse
+                ? Style.hoverFillFor(root.foreground, Color.accent)
+                : (root.appPickerOpen ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+              border.width: root.appPickerOpen ? 0 : 1
+              border.color: Qt.darker(root.foreground, 2.2)
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "+ Add app"
+                color: root.appPickerOpen ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: globalAddAppMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.appPickerOpen = !root.appPickerOpen
+                  if (!root.appPickerOpen) root.appPickerQuery = ""
+                }
+              }
+            }
+          }
+
+          // Search installed apps and add one ahead of it ever notifying, so
+          // its rules can be set up in advance — see root.addTrackedApp.
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.appPickerOpen
+
+            TextField {
+              id: globalAppPickerField
+              width: parent.width
+              foreground: root.foreground
+              placeholderText: "Search installed apps"
+              text: root.appPickerQuery
+              onTextChanged: root.appPickerQuery = text
+              Component.onCompleted: forceActiveFocus()
+            }
+
+            Text {
+              width: parent.width
+              visible: root.appPickerResults.length === 0
+              text: root.appPickerQuery.trim()
+                ? "No installed app matches, or it's already tracked."
+                : "Type to search, or browse installed apps."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+              model: root.appPickerResults
+
+              delegate: Rectangle {
+                required property var modelData
+                width: parent ? parent.width : 0
+                height: Style.space(36)
+                radius: Style.spacing.labelGap
+                color: globalResultMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+                Image {
+                  id: globalResultIcon
+                  readonly property string src: root.iconSource(modelData.icon)
+                  visible: src !== "" && status === Image.Ready
+                  source: src
+                  width: Style.space(20)
+                  height: Style.space(20)
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  fillMode: Image.PreserveAspectFit
+                  asynchronous: true
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: globalResultIcon.visible ? globalResultIcon.right : parent.left
+                  anchors.leftMargin: Style.space(8)
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: modelData.name
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+
+                MouseArea {
+                  id: globalResultMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.addTrackedApp(modelData.name)
+                }
+              }
+            }
+
+            PanelSeparator { width: parent.width }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.seenApps.length > 0
+            text: "Every app that has ever sent a notification, plus any you've added above."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            width: parent.width
+            visible: root.seenApps.length === 0
+            text: "No apps tracked yet. They appear here once they notify you, or once you add one above."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Repeater {
+            model: root.seenApps
+
+            delegate: Rectangle {
+              id: globalAppRow
+              required property var modelData
+              width: content.width
+              height: Style.space(44)
+              radius: Style.spacing.labelGap
+              color: globalRowHover.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+              HoverHandler { id: globalRowHover }
+
+              Text {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(8)
+                anchors.right: globalImportantSwitch.left
+                anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                text: globalAppRow.modelData
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+
+              ToggleSwitch {
+                id: globalImportantSwitch
+                anchors.right: globalForgetBg.left
+                anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                foreground: root.foreground
+                checked: root.isImportantApp(globalAppRow.modelData)
+                onToggled: root.setImportantApp(globalAppRow.modelData, !checked)
+              }
+
+              Rectangle {
+                id: globalForgetBg
+                width: Style.space(22)
+                height: Style.space(22)
+                radius: width / 2
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                color: globalForgetMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+                Text {
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: "󰅖"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                MouseArea {
+                  id: globalForgetMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.forgetSeenApp(globalAppRow.modelData)
+                }
+              }
+            }
+          }
+        }
+
         // ---------- history: shown together with the profile strip above,
         // not behind a separate tab ----------
 
         Column {
           width: parent.width
           spacing: Style.space(10)
-          visible: root.view !== "editor"
+          visible: root.view === "switcher"
 
           Item {
             width: parent.width

@@ -281,7 +281,7 @@ function historyEntry(value, normalUrgency) {
 // so the service can rewrite the file without the dead payload.
 function parseSettings(raw) {
   var text = String(raw || "").trim()
-  if (!text) return { error: false, dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null, importantApps: null }
+  if (!text) return { error: false, dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, importantApps: null }
 
   try {
     var parsed = JSON.parse(text)
@@ -292,11 +292,10 @@ function parseSettings(raw) {
       profiles: parsed && Array.isArray(parsed.profiles) ? sanitizeProfiles(parsed.profiles) : null,
       activeProfile: parsed && typeof parsed.activeProfile === "string" ? parsed.activeProfile : null,
       seenApps: parsed && Array.isArray(parsed.seenApps) ? sanitizeSeenApps(parsed.seenApps) : null,
-      allowUnknownApps: parsed && typeof parsed.allowUnknownApps === "boolean" ? parsed.allowUnknownApps : null,
       importantApps: parsed && Array.isArray(parsed.importantApps) ? sanitizeAppNames(parsed.importantApps) : null
     }
   } catch (e) {
-    return { error: true, errorMessage: String(e), dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null, importantApps: null }
+    return { error: true, errorMessage: String(e), dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, importantApps: null }
   }
 }
 
@@ -346,9 +345,9 @@ function sanitizeSeenApps(list) {
 // muting profile is one click rather than a rule-by-rule undo.
 function defaultProfiles() {
   return [
-    { name: "Normal", icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null, importantOverrideOn: [], importantOverrideOff: [] },
-    { name: "Work", icon: "󰂱", muteApps: [], dndAll: false, allowUnknownApps: null, importantOverrideOn: [], importantOverrideOff: [] },
-    { name: "Game", icon: "󰖃", muteApps: [], dndAll: false, allowUnknownApps: null, importantOverrideOn: [], importantOverrideOff: [] }
+    { name: "Normal", icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: true, importantOverrideOn: [], importantOverrideOff: [] },
+    { name: "Work", icon: "󰂱", muteApps: [], dndAll: false, allowUnknownApps: true, importantOverrideOn: [], importantOverrideOff: [] },
+    { name: "Game", icon: "󰖃", muteApps: [], dndAll: false, allowUnknownApps: true, importantOverrideOn: [], importantOverrideOff: [] }
   ]
 }
 
@@ -390,9 +389,10 @@ function sanitizeProfiles(list) {
       icon: String(raw.icon || ""),
       muteApps: sanitizeAppNames(raw.muteApps),
       dndAll: !!raw.dndAll,
-      // null inherits the global allowUnknownApps setting; true/false
-      // overrides it for this profile specifically.
-      allowUnknownApps: typeof raw.allowUnknownApps === "boolean" ? raw.allowUnknownApps : null,
+      // Plain per-profile boolean, defaulting true (allow) — a profile that
+      // has never touched this, or a legacy/malformed value, behaves as
+      // "allow" rather than silently starting to block first-time senders.
+      allowUnknownApps: typeof raw.allowUnknownApps === "boolean" ? raw.allowUnknownApps : true,
       // Per-app override of the global "keep this app's toasts on screen"
       // setting, same inherit/on/off shape as allowUnknownApps but per-app
       // rather than a single switch — an app not in either list inherits
