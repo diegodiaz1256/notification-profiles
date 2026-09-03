@@ -41,6 +41,47 @@ Panel {
   property bool draftIsNew: false
   property bool iconPickerOpen: false
 
+  // Installed-app picker: search DesktopEntries for an app that hasn't sent
+  // a notification yet, so its rules can be set up ahead of time. Query
+  // text lives here (not the TextField's own text) so closing and
+  // reopening the picker starts clean.
+  property bool appPickerOpen: false
+  property string appPickerQuery: ""
+  readonly property int appPickerResultsCap: 8
+
+  readonly property var appPickerResults: {
+    if (!root.appPickerOpen) return []
+    var query = root.appPickerQuery.trim().toLowerCase()
+    var tracked = {}
+    for (var i = 0; i < root.seenApps.length; i++) tracked[String(root.seenApps[i]).toLowerCase()] = true
+    var out = []
+    var values = DesktopEntries.applications.values || []
+    for (var j = 0; j < values.length && out.length < root.appPickerResultsCap; j++) {
+      var entry = values[j]
+      var name = String((entry && entry.name) || "").trim()
+      if (!name || tracked[name.toLowerCase()]) continue
+      if (query && name.toLowerCase().indexOf(query) === -1) continue
+      out.push({ name: name, icon: (entry && entry.icon) || "" })
+    }
+    return out
+  }
+
+  function addTrackedApp(name) {
+    var app = String(name || "").trim()
+    if (!app) return
+    // Applied locally first, same reasoning as everywhere else in this file:
+    // the round-trip to the daemon and back would leave the row missing from
+    // root.seenApps for one refresh cycle otherwise.
+    var already = false
+    for (var i = 0; i < root.seenApps.length; i++) {
+      if (String(root.seenApps[i]).toLowerCase() === app.toLowerCase()) { already = true; break }
+    }
+    if (!already) root.seenApps = root.seenApps.concat([app])
+    run(["trackApp", app])
+    root.appPickerOpen = false
+    root.appPickerQuery = ""
+  }
+
   readonly property var availableIcons: [
     "󰂚", "󰂱", "󰖃", "󰽥", "󰖨", "󰋜", "󰋑", "󰓎", "󰈻", "󰄦",
     "󰂺", "󰝚", "󰅩", "󰒃", "󰊄", "󰀝", "󰄋", "󰣆", "󰄐", "󰉚",
@@ -964,29 +1005,150 @@ Panel {
 
           PanelSeparator { width: parent.width }
 
-          PanelSectionHeader {
+          Item {
             width: parent.width
-            text: "Mute these apps"
-            fontFamily: root.fontFamily
-            foreground: root.foreground
+            implicitHeight: Math.max(muteHeader.implicitHeight, addAppButton.height)
+
+            PanelSectionHeader {
+              id: muteHeader
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Mute these apps"
+              fontFamily: root.fontFamily
+              foreground: root.foreground
+            }
+
+            Rectangle {
+              id: addAppButton
+              width: Style.space(90)
+              height: Style.space(26)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.spacing.labelGap
+              color: addAppMouse.containsMouse
+                ? Style.hoverFillFor(root.foreground, Color.accent)
+                : (root.appPickerOpen ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+              border.width: root.appPickerOpen ? 0 : 1
+              border.color: Qt.darker(root.foreground, 2.2)
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "+ Add app"
+                color: root.appPickerOpen ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: addAppMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.appPickerOpen = !root.appPickerOpen
+                  if (!root.appPickerOpen) root.appPickerQuery = ""
+                }
+              }
+            }
+          }
+
+          // Search installed apps and add one ahead of it ever notifying, so
+          // its rules can be set up in advance — see root.addTrackedApp.
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.appPickerOpen
+
+            TextField {
+              id: appPickerField
+              width: parent.width
+              foreground: root.foreground
+              placeholderText: "Search installed apps"
+              text: root.appPickerQuery
+              onTextChanged: root.appPickerQuery = text
+              Component.onCompleted: forceActiveFocus()
+            }
+
+            Text {
+              width: parent.width
+              visible: root.appPickerResults.length === 0
+              text: root.appPickerQuery.trim()
+                ? "No installed app matches, or it's already tracked."
+                : "Type to search, or browse installed apps."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+              model: root.appPickerResults
+
+              delegate: Rectangle {
+                required property var modelData
+                width: parent ? parent.width : 0
+                height: Style.space(36)
+                radius: Style.spacing.labelGap
+                color: resultMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+                Image {
+                  id: resultIcon
+                  readonly property string src: root.iconSource(modelData.icon)
+                  visible: src !== "" && status === Image.Ready
+                  source: src
+                  width: Style.space(20)
+                  height: Style.space(20)
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  fillMode: Image.PreserveAspectFit
+                  asynchronous: true
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: resultIcon.visible ? resultIcon.right : parent.left
+                  anchors.leftMargin: resultIcon.visible ? Style.space(8) : Style.space(8)
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: modelData.name
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+
+                MouseArea {
+                  id: resultMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.addTrackedApp(modelData.name)
+                }
+              }
+            }
+
+            PanelSeparator { width: parent.width }
           }
 
           Text {
             width: parent.width
             visible: root.seenApps.length > 0
-            text: "Every app that has ever sent a notification on this machine, so you can pick from real names instead of typing one."
+            text: "Every app that has ever sent a notification, plus any you've added above."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
           }
 
-          // Apps that have never sent anything cannot be listed, and typing a
-          // name from memory rarely matches what the sender actually set.
+          // Apps that have never sent anything, and haven't been added from
+          // the picker above, have no real name to show a rule for yet.
           Text {
             width: parent.width
             visible: root.seenApps.length === 0
-            text: "No apps have sent a notification yet. They appear here once they do."
+            text: "No apps tracked yet. They appear here once they notify you, or once you add one above."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

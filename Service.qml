@@ -327,22 +327,45 @@ Item {
   // a misbehaving app that randomises its app_name can't grow the settings
   // file unbounded — the oldest entry is dropped to make room, same as the
   // 30-day prune would eventually get it anyway.
+  //
+  // manual marks an entry added from the installed-apps picker rather than
+  // an actual notification (see trackApp) — pruneSeenApps exempts it from
+  // the age-based sweep, since a user pre-configuring a rule for an app they
+  // expect to use soon shouldn't have it vanish before it ever fires once.
+  // A real notification always clears the bit: once the app has genuinely
+  // notified, it ages out on the normal schedule like everything else.
   readonly property int seenAppsLimit: 200
   readonly property int seenAppsMaxAgeMs: 30 * 24 * 60 * 60 * 1000
-  function recordSeenApp(appName) {
+  function recordSeenApp(appName, manual) {
     var app = String(appName || "").trim()
     if (!app) return
     var now = Date.now()
     var next = service.seenApps.filter(function(e) { return e.name !== app })
-    next.push({ name: app, lastSeen: now })
+    next.push({ name: app, lastSeen: now, manual: !!manual })
     next.sort(function(a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
     if (next.length > service.seenAppsLimit) {
+      // Manual entries are exempt from the age prune, but not from this
+      // count cap — 200 tracked apps is already generous, and a manual
+      // add competing on the same "oldest first" ordering as everything
+      // else keeps this cap simple instead of needing its own carve-out.
       next.sort(function(a, b) { return a.lastSeen - b.lastSeen })
       next = next.slice(next.length - service.seenAppsLimit)
       next.sort(function(a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
     }
     service.seenApps = next
     service.scheduleSettingsSave()
+  }
+
+  // Adds an app to the tracked list from the installed-apps picker, before
+  // it has ever actually sent a notification — so its mute/important rules
+  // can be set up ahead of time. A no-op if the app is already tracked
+  // (manually or otherwise): the picker filters those out already, but the
+  // daemon doesn't trust the panel not to double-submit.
+  function trackApp(appName) {
+    var app = String(appName || "").trim()
+    if (!app) return
+    if (NotificationLogic.findSeenApp(service.seenApps, app)) return
+    service.recordSeenApp(app, true)
   }
 
   // Drops one name from the tracked list — test senders and one-off scripts
@@ -359,9 +382,10 @@ Item {
   // Ages out anything not seen in 30 days. Run at startup and periodically
   // (see pruneTimer) rather than only on the next notification, so a name
   // that genuinely stopped sending altogether still eventually clears.
+  // manual entries are exempt — see recordSeenApp/trackApp.
   function pruneSeenApps() {
     var cutoff = Date.now() - service.seenAppsMaxAgeMs
-    var next = service.seenApps.filter(function(e) { return (e.lastSeen || 0) >= cutoff })
+    var next = service.seenApps.filter(function(e) { return e.manual || (e.lastSeen || 0) >= cutoff })
     if (next.length === service.seenApps.length) return
     service.seenApps = next
     service.scheduleSettingsSave()
@@ -1413,6 +1437,13 @@ Item {
     // block: the next notification from it re-adds it, seen fresh.
     function forgetSeenApp(appName: string): string {
       service.forgetSeenApp(appName)
+      return "ok"
+    }
+
+    // Adds an app to the tracked list from the installed-apps picker, ahead
+    // of it ever actually sending a notification — see service.trackApp.
+    function trackApp(appName: string): string {
+      service.trackApp(appName)
       return "ok"
     }
 

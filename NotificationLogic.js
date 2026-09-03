@@ -303,27 +303,32 @@ function parseSettings(raw) {
 // seenApps moved from a flat name array to {name, lastSeen} objects so
 // entries can age out after 30 days — a settings file from before that
 // change carries the old shape, and gets each name stamped with "now" so it
-// isn't pruned immediately on the first load after upgrading.
+// isn't pruned immediately on the first load after upgrading. `manual` is a
+// later addition (an app added from the installed-apps picker, before it
+// has ever actually sent anything) and defaults to false for both the old
+// string shape and any object shape written before it existed.
 function sanitizeSeenApps(list) {
   var out = []
   var seen = {}
   var now = Date.now()
   for (var i = 0; i < (list || []).length; i++) {
     var raw = list[i]
-    var name, lastSeen
+    var name, lastSeen, manual
     if (typeof raw === "string") {
       name = raw.trim()
       lastSeen = now
+      manual = false
     } else if (raw && typeof raw === "object") {
       name = String(raw.name || "").trim()
       lastSeen = Number(raw.lastSeen)
       if (!isFinite(lastSeen) || lastSeen <= 0) lastSeen = now
+      manual = !!raw.manual
     } else {
       continue
     }
     if (!name || seen[name]) continue
     seen[name] = true
-    out.push({ name: name, lastSeen: lastSeen })
+    out.push({ name: name, lastSeen: lastSeen, manual: manual })
   }
   return out
 }
