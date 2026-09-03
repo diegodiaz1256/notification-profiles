@@ -775,14 +775,17 @@ Item {
   // xdg-open on an http(s) URL hands it to the default browser, which
   // reuses an existing tab for that origin rather than opening a new one
   // when the site is already loaded there.
+  // Window focus goes first: an app that's already running (WhatsApp and
+  // any other installed --app= webapp, plus every non-browser app) has one
+  // exact place a click should land, and opening its notification's URL
+  // instead would launch a second, disconnected window even though the
+  // right one is already open. The URL is the fallback for a site that
+  // isn't running as its own window at all — a plain tab or a site that was
+  // closed — where there's nothing to focus and opening it is the closest
+  // thing to "take me there" available.
   function focusApp(entry) {
     if (!entry || !entry.app) return
-    var url = NotificationLogic.bodyLinkUrl(entry.body)
-    if (url) {
-      openUrlProc.command = ["xdg-open", url]
-      openUrlProc.running = true
-      return
-    }
+    focusAppProc.entry = entry
     focusAppProc.command = [
       service.omarchyPath + "/bin/omarchy-hyprland-focus-app",
       String(entry.app)
@@ -790,7 +793,23 @@ Item {
     focusAppProc.running = true
   }
 
-  Process { id: focusAppProc; running: false }
+  Process {
+    id: focusAppProc
+    property var entry: null
+    running: false
+    onExited: function(exitCode) {
+      // No window matched — fall back to the notification's own URL, if it
+      // had one.
+      if (exitCode !== 0) {
+        var url = NotificationLogic.bodyLinkUrl(focusAppProc.entry ? focusAppProc.entry.body : "")
+        if (url) {
+          openUrlProc.command = ["xdg-open", url]
+          openUrlProc.running = true
+        }
+      }
+      focusAppProc.entry = null
+    }
+  }
   Process { id: openUrlProc; running: false }
 
   Process {
