@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "zeroge.notification-profiles",
+  "name": "Notification Profiles",
+  "version": "1.0.0",
+  "author": "zeroge",
+  "license": "MIT",
+  "description": "Notification daemon, popups, DND, and history — extended with named profiles that each mute their own set of apps",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.notifications"
+  },
+  "barWidget": {
+    "displayName": "Notification Profiles",
+    "description": "A profile per activity — Work, Game, Normal — each with its own list of muted apps. Click to switch, right-click to edit, history alongside.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showProfileName": true
+    },
+    "schema": [
+      {
+        "key": "showProfileName",
+        "type": "boolean",
+        "label": "Show profile name in the bar",
+        "defaultValue": true,
+        "description": "Off leaves the icon alone, which is the version for a crowded bar."
+      }
+    ]
+  }
+}
