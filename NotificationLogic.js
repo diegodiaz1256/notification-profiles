@@ -265,7 +265,13 @@ function historyEntry(value, normalUrgency) {
     execArgv: e.execArgv || "",
     urgency: typeof e.urgency === "number" ? e.urgency : normalUrgency,
     expireTimeout: 0,
-    timestamp: e.timestamp || 0
+    timestamp: e.timestamp || 0,
+    // Present on every row from here, even a history-only one that never
+    // shows as a toast — popupModel's Repeater delegate declares this
+    // `required`, and a required property needs the model role to exist on
+    // every row or the delegate fails to instantiate, not just the ones
+    // that came through popupEntry.
+    important: !!e.important
   }
 }
 
@@ -275,7 +281,7 @@ function historyEntry(value, normalUrgency) {
 // so the service can rewrite the file without the dead payload.
 function parseSettings(raw) {
   var text = String(raw || "").trim()
-  if (!text) return { error: false, dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null }
+  if (!text) return { error: false, dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null, importantApps: null }
 
   try {
     var parsed = JSON.parse(text)
@@ -286,10 +292,11 @@ function parseSettings(raw) {
       profiles: parsed && Array.isArray(parsed.profiles) ? sanitizeProfiles(parsed.profiles) : null,
       activeProfile: parsed && typeof parsed.activeProfile === "string" ? parsed.activeProfile : null,
       seenApps: parsed && Array.isArray(parsed.seenApps) ? sanitizeSeenApps(parsed.seenApps) : null,
-      allowUnknownApps: parsed && typeof parsed.allowUnknownApps === "boolean" ? parsed.allowUnknownApps : null
+      allowUnknownApps: parsed && typeof parsed.allowUnknownApps === "boolean" ? parsed.allowUnknownApps : null,
+      importantApps: parsed && Array.isArray(parsed.importantApps) ? sanitizeAppNames(parsed.importantApps) : null
     }
   } catch (e) {
-    return { error: true, errorMessage: String(e), dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null }
+    return { error: true, errorMessage: String(e), dnd: null, legacy: false, profiles: null, activeProfile: null, seenApps: null, allowUnknownApps: null, importantApps: null }
   }
 }
 
@@ -334,9 +341,9 @@ function sanitizeSeenApps(list) {
 // muting profile is one click rather than a rule-by-rule undo.
 function defaultProfiles() {
   return [
-    { name: "Normal", icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null },
-    { name: "Work", icon: "󰂱", muteApps: [], dndAll: false, allowUnknownApps: null },
-    { name: "Game", icon: "󰖃", muteApps: [], dndAll: false, allowUnknownApps: null }
+    { name: "Normal", icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null, importantOverrideOn: [], importantOverrideOff: [] },
+    { name: "Work", icon: "󰂱", muteApps: [], dndAll: false, allowUnknownApps: null, importantOverrideOn: [], importantOverrideOff: [] },
+    { name: "Game", icon: "󰖃", muteApps: [], dndAll: false, allowUnknownApps: null, importantOverrideOn: [], importantOverrideOff: [] }
   ]
 }
 
@@ -362,6 +369,17 @@ function sanitizeProfiles(list) {
     var name = String(raw.name || "").trim()
     if (!name || seen[name]) continue
     seen[name] = true
+    // An app in both override lists (a hand-edited settings file, or a
+    // client sending stale data) resolves "on" — importantOverrideOff is
+    // filtered clear of anything importantOverrideOn already claims, so the
+    // two never actually disagree once sanitized.
+    var overrideOn = sanitizeAppNames(raw.importantOverrideOn)
+    var overrideOnSet = {}
+    for (var j = 0; j < overrideOn.length; j++) overrideOnSet[overrideOn[j].toLowerCase()] = true
+    var overrideOff = sanitizeAppNames(raw.importantOverrideOff).filter(function(a) {
+      return !overrideOnSet[a.toLowerCase()]
+    })
+
     out.push({
       name: name,
       icon: String(raw.icon || ""),
@@ -369,7 +387,13 @@ function sanitizeProfiles(list) {
       dndAll: !!raw.dndAll,
       // null inherits the global allowUnknownApps setting; true/false
       // overrides it for this profile specifically.
-      allowUnknownApps: typeof raw.allowUnknownApps === "boolean" ? raw.allowUnknownApps : null
+      allowUnknownApps: typeof raw.allowUnknownApps === "boolean" ? raw.allowUnknownApps : null,
+      // Per-app override of the global "keep this app's toasts on screen"
+      // setting, same inherit/on/off shape as allowUnknownApps but per-app
+      // rather than a single switch — an app not in either list inherits
+      // whatever the global importantApps list says.
+      importantOverrideOn: overrideOn,
+      importantOverrideOff: overrideOff
     })
   }
   return out
@@ -513,6 +537,32 @@ function profileSilences(profile, appName) {
   return false
 }
 
+function listHasApp(list, needle) {
+  for (var i = 0; i < (list || []).length; i++) {
+    if (String(list[i] || "").trim().toLowerCase() === needle) return true
+  }
+  return false
+}
+
+// Whether an app's toast should stay on screen instead of auto-dismissing.
+// A profile's own override list wins when the app appears in either one
+// (importantOverrideOn/Off are already mutually exclusive post-sanitize);
+// with no override, the global importantApps list decides. Evaluated once
+// per notification at the moment it arrives (see Service.qml's
+// handleNotification) and stored on the row, not re-resolved on every
+// render — a toast restored after a shell restart, or one still on screen
+// after the active profile changed, keeps the answer that was true when it
+// was received rather than one that drifts under it.
+function isAppImportant(profile, appName, globalImportantApps) {
+  var needle = String(appName || "").trim().toLowerCase()
+  if (!needle) return false
+  if (profile) {
+    if (listHasApp(profile.importantOverrideOn, needle)) return true
+    if (listHasApp(profile.importantOverrideOff, needle)) return false
+  }
+  return listHasApp(globalImportantApps, needle)
+}
+
 // The next profile in the list, wrapping. Used by the cycleProfile IPC so a
 // keybind can rotate through them without the panel open.
 function nextProfileName(profiles, activeName) {
@@ -544,6 +594,11 @@ function popupEntry(value, normalUrgency) {
   // restored rows match the roles of freshly received ones.
   var deadline = Number((value || {}).deadline || 0)
   if (isFinite(deadline) && deadline > 0) entry.deadline = deadline
+  // Resolved once when the notification arrived (see Service.qml's
+  // handleNotification / isAppImportant) and carried as data from there —
+  // a history row has no use for it (importance only ever affects whether a
+  // toast stays on screen), so it's added here rather than in historyEntry.
+  entry.important = !!(value || {}).important
   return entry
 }
 
@@ -730,6 +785,7 @@ if (typeof module !== "undefined") {
     findProfile: findProfile,
     resolveActiveProfile: resolveActiveProfile,
     profileSilences: profileSilences,
+    isAppImportant: isAppImportant,
     nextProfileName: nextProfileName,
     historyRows: historyRows,
     popupEntry: popupEntry,

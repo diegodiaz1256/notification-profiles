@@ -113,6 +113,23 @@ Item {
     service.scheduleSettingsSave()
   }
 
+  // Apps whose toast stays on screen instead of auto-dismissing, by
+  // default. A profile can override this per-app in either direction (see
+  // NotificationLogic.isAppImportant) — this is only the fallback for an
+  // app with no override in the active profile.
+  property var importantApps: []
+
+  function setImportantApp(appName, important) {
+    var app = String(appName || "").trim()
+    if (!app) return
+    var next = service.importantApps.filter(function(a) {
+      return String(a).trim().toLowerCase() !== app.toLowerCase()
+    })
+    if (important) next.push(app)
+    service.importantApps = next
+    service.scheduleSettingsSave()
+  }
+
   readonly property var activeProfile: NotificationLogic.resolveActiveProfile(profiles, activeProfileName)
 
   function setActiveProfile(name) {
@@ -147,7 +164,8 @@ Item {
     if (!NotificationLogic.findProfile(incoming, service.defaultProfileName)) {
       var restored = NotificationLogic.findProfile(service.profiles, service.defaultProfileName)
       incoming = incoming.concat([restored || {
-        name: service.defaultProfileName, icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null
+        name: service.defaultProfileName, icon: "󰶚", muteApps: [], dndAll: false, allowUnknownApps: null,
+        importantOverrideOn: [], importantOverrideOff: []
       }])
     }
 
@@ -242,7 +260,10 @@ Item {
         return String(a).trim().toLowerCase() !== app.toLowerCase()
       })
       if (muted) apps.push(app)
-      next.push({ name: p.name, icon: p.icon, muteApps: apps, dndAll: p.dndAll, allowUnknownApps: p.allowUnknownApps })
+      next.push({
+        name: p.name, icon: p.icon, muteApps: apps, dndAll: p.dndAll, allowUnknownApps: p.allowUnknownApps,
+        importantOverrideOn: p.importantOverrideOn, importantOverrideOff: p.importantOverrideOff
+      })
     }
     if (!found) return false
     service.profiles = next
@@ -259,7 +280,42 @@ Item {
       var p = service.profiles[i]
       if (p.name !== String(profileName || "")) { next.push(p); continue }
       found = true
-      next.push({ name: p.name, icon: p.icon, muteApps: p.muteApps, dndAll: p.dndAll, allowUnknownApps: value })
+      next.push({
+        name: p.name, icon: p.icon, muteApps: p.muteApps, dndAll: p.dndAll, allowUnknownApps: value,
+        importantOverrideOn: p.importantOverrideOn, importantOverrideOff: p.importantOverrideOff
+      })
+    }
+    if (!found) return false
+    service.profiles = next
+    service.scheduleSettingsSave()
+    return true
+  }
+
+  // value: true forces this app important in this profile regardless of the
+  // global list, false forces it not-important, null clears the override
+  // and goes back to inheriting the global. Same rebuild-not-mutate shape as
+  // setAppMuted/setProfileAllowUnknownApps.
+  function setProfileImportantOverride(profileName, appName, value) {
+    var app = String(appName || "").trim()
+    if (!app) return false
+    var next = []
+    var found = false
+    for (var i = 0; i < service.profiles.length; i++) {
+      var p = service.profiles[i]
+      if (p.name !== String(profileName || "")) { next.push(p); continue }
+      found = true
+      var onList = (p.importantOverrideOn || []).filter(function(a) {
+        return String(a).trim().toLowerCase() !== app.toLowerCase()
+      })
+      var offList = (p.importantOverrideOff || []).filter(function(a) {
+        return String(a).trim().toLowerCase() !== app.toLowerCase()
+      })
+      if (value === true) onList.push(app)
+      else if (value === false) offList.push(app)
+      next.push({
+        name: p.name, icon: p.icon, muteApps: p.muteApps, dndAll: p.dndAll, allowUnknownApps: p.allowUnknownApps,
+        importantOverrideOn: onList, importantOverrideOff: offList
+      })
     }
     if (!found) return false
     service.profiles = next
@@ -336,7 +392,11 @@ Item {
   readonly property int normalPopupDuration: 8000
   readonly property int maxPopupDuration: 30000
 
-  function durationFor(urgency, expireTimeout) {
+  // important short-circuits to 0 (never auto-dismiss) ahead of the urgency
+  // switch, same treatment Critical already gets — an important app's toast
+  // stays up regardless of the urgency it happened to be sent at.
+  function durationFor(urgency, expireTimeout, important) {
+    if (important) return 0
     switch (urgency) {
     case NotificationUrgency.Critical:
       return 0
@@ -396,6 +456,13 @@ Item {
     // captured for the popup card.
     notification.tracked = true
     var snapshot = snapshotOf(notification)
+    // Resolved once, now, against the profile active at arrival — carried
+    // on the row from here rather than re-evaluated on every render, so a
+    // toast that outlives a profile switch (or a shell restart) keeps
+    // answering to the profile that was active when it actually arrived.
+    // See NotificationLogic.isAppImportant.
+    snapshot.important = NotificationLogic.isAppImportant(
+      service.activeProfile, notification.appName, service.importantApps)
     liveRefs[snapshot.originalId] = notification
     // Guard the delete: a newer notification may have reused this originalId
     // (freedesktop replaces_id) and taken over the map slot.
@@ -538,6 +605,11 @@ Item {
       if (!row || row.originalId !== originalId || row.timestamp !== timestamp) continue
       if (!NotificationLogic.popupRowChanged(row, updated)) return
       for (var r = 0; r < roles.length; r++) popupModel.setProperty(i, roles[r], updated[roles[r]])
+      // important isn't a POPUP_ROLES field (a client update can't change
+      // it), but persistPopupFile needs it on the object it's given —
+      // replacementSnapshot doesn't carry it, so it's read back off the row
+      // that setProperty just left untouched.
+      updated.important = row.important
       // The file name is the timestamp and id this popup was persisted under,
       // so the rewrite lands on the same file: a restart restores the version
       // last shown, and so does the copy that ends up in history.
@@ -986,7 +1058,8 @@ Item {
         execArgv: "",
         urgency: NotificationUrgency.Low,
         expireTimeout: 0,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        important: false
       })
       return
     }
@@ -1017,7 +1090,7 @@ Item {
     var live = []
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i]
-      var duration = durationFor(entry.urgency, entry.expireTimeout)
+      var duration = durationFor(entry.urgency, entry.expireTimeout, entry.important)
       if (NotificationLogic.popupExpired(entry, duration, now)) {
         // It would have expired on screen had the shell kept running, so it
         // gets archived exactly like an expiry that happened while it did.
@@ -1120,6 +1193,7 @@ Item {
     if (parsed.activeProfile) service.activeProfileName = parsed.activeProfile
     if (parsed.seenApps) service.seenApps = parsed.seenApps
     if (parsed.allowUnknownApps !== null) service.allowUnknownApps = parsed.allowUnknownApps
+    if (parsed.importantApps) service.importantApps = parsed.importantApps
 
     service.settingsLoaded = true
     // A machine that's been off for a while, or just upgraded from before
@@ -1139,12 +1213,13 @@ Item {
 
   function flushSettings() {
     settingsFile.setText(JSON.stringify({
-      version: 5,
+      version: 6,
       dnd: persisted.doNotDisturb,
       activeProfile: service.activeProfileName,
       profiles: service.profiles,
       seenApps: service.seenApps,
-      allowUnknownApps: service.allowUnknownApps
+      allowUnknownApps: service.allowUnknownApps,
+      importantApps: service.importantApps
     }, null, 2) + "\n")
   }
 
@@ -1265,7 +1340,8 @@ Item {
         active: service.activeProfileName,
         profiles: service.profiles,
         seenApps: service.seenAppNames,
-        allowUnknownApps: service.allowUnknownApps
+        allowUnknownApps: service.allowUnknownApps,
+        importantApps: service.importantApps
       })
     }
 
@@ -1313,6 +1389,24 @@ Item {
       var v = String(value || "").toLowerCase()
       var stored = v === "true" ? true : (v === "false" ? false : null)
       return service.setProfileAllowUnknownApps(profileName, stored) ? "ok" : "unknown"
+    }
+
+    // Whether an app's toast stays on screen by default, absent a profile
+    // override — see NotificationLogic.isAppImportant for how a profile's
+    // own override list can still change the outcome for that app.
+    function setImportantApp(appName: string, important: string): string {
+      var v = String(important || "").toLowerCase()
+      service.setImportantApp(appName, v === "true" || v === "1" || v === "on" || v === "yes")
+      return "ok"
+    }
+
+    // value: "true" forces this app important in this profile, "false"
+    // forces it not-important, "inherit" (or anything else) clears the
+    // override and goes back to the global importantApps list.
+    function setProfileImportantOverride(profileName: string, appName: string, value: string): string {
+      var v = String(value || "").toLowerCase()
+      var stored = v === "true" ? true : (v === "false" ? false : null)
+      return service.setProfileImportantOverride(profileName, appName, stored) ? "ok" : "unknown"
     }
 
     // Drops one tracked app so it stops cluttering the mute list. Not a
@@ -1412,6 +1506,7 @@ Item {
             required property int urgency
             required property double expireTimeout
             required property double timestamp
+            required property bool important
 
             // Each card sizes itself based on mode (text vs media); the slot
             // tracks the card so the column auto-fits to whichever is widest.
@@ -1419,7 +1514,7 @@ Item {
             Layout.alignment: Qt.AlignRight
             implicitHeight: card.implicitHeight
 
-            readonly property real lifetime: service.durationFor(cardSlot.urgency, cardSlot.expireTimeout)
+            readonly property real lifetime: service.durationFor(cardSlot.urgency, cardSlot.expireTimeout, cardSlot.important)
             property real remainingLifetime: 1.0
             readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered
 

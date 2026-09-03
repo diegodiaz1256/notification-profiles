@@ -23,6 +23,7 @@ Panel {
   property string activeName: ""
   property var seenApps: []
   property bool allowUnknownApps: true
+  property var importantApps: []
 
   // Which profile the editor is showing. Empty means the switcher list.
   property string editingName: ""
@@ -55,7 +56,12 @@ Panel {
       dndAll: !!profile.dndAll,
       // null inherits the global "allow unknown apps" setting; a boolean
       // overrides it just for this profile.
-      allowUnknownApps: typeof profile.allowUnknownApps === "boolean" ? profile.allowUnknownApps : null
+      allowUnknownApps: typeof profile.allowUnknownApps === "boolean" ? profile.allowUnknownApps : null,
+      // Per-app "keep this app's toast on screen" override for this
+      // profile, same inherit/on/off shape as allowUnknownApps but keyed
+      // per app instead of a single value.
+      importantOverrideOn: (profile.importantOverrideOn || []).slice(),
+      importantOverrideOff: (profile.importantOverrideOff || []).slice()
     }
     root.draftIsNew = !!isNew
     root.editingName = profile.name
@@ -80,8 +86,42 @@ Panel {
       icon: changes.icon !== undefined ? changes.icon : root.draft.icon,
       muteApps: changes.muteApps !== undefined ? changes.muteApps : root.draft.muteApps,
       dndAll: changes.dndAll !== undefined ? changes.dndAll : root.draft.dndAll,
-      allowUnknownApps: changes.allowUnknownApps !== undefined ? changes.allowUnknownApps : root.draft.allowUnknownApps
+      allowUnknownApps: changes.allowUnknownApps !== undefined ? changes.allowUnknownApps : root.draft.allowUnknownApps,
+      importantOverrideOn: changes.importantOverrideOn !== undefined ? changes.importantOverrideOn : root.draft.importantOverrideOn,
+      importantOverrideOff: changes.importantOverrideOff !== undefined ? changes.importantOverrideOff : root.draft.importantOverrideOff
     }
+  }
+
+  // Tri-state read for one app in the draft: true/false if this profile
+  // overrides it, null if it's inheriting the global.
+  function draftImportantOverride(app) {
+    if (!root.draft) return null
+    var needle = String(app || "").toLowerCase()
+    var on = root.draft.importantOverrideOn || []
+    for (var i = 0; i < on.length; i++) {
+      if (String(on[i]).toLowerCase() === needle) return true
+    }
+    var off = root.draft.importantOverrideOff || []
+    for (var j = 0; j < off.length; j++) {
+      if (String(off[j]).toLowerCase() === needle) return false
+    }
+    return null
+  }
+
+  // value: true/false to set an override, null to clear it back to inherit.
+  function setDraftImportantOverride(app, value) {
+    if (!root.draft) return
+    var needle = String(app || "").trim()
+    if (!needle) return
+    var on = (root.draft.importantOverrideOn || []).filter(function(a) {
+      return String(a).trim().toLowerCase() !== needle.toLowerCase()
+    })
+    var off = (root.draft.importantOverrideOff || []).filter(function(a) {
+      return String(a).trim().toLowerCase() !== needle.toLowerCase()
+    })
+    if (value === true) on.push(needle)
+    else if (value === false) off.push(needle)
+    root.mergeDraft({ importantOverrideOn: on, importantOverrideOff: off })
   }
 
   function draftMuted(app) {
@@ -118,7 +158,9 @@ Panel {
       icon: root.draft.icon,
       muteApps: root.draft.muteApps,
       dndAll: root.draft.dndAll,
-      allowUnknownApps: root.draft.allowUnknownApps
+      allowUnknownApps: root.draft.allowUnknownApps,
+      importantOverrideOn: root.draft.importantOverrideOn,
+      importantOverrideOff: root.draft.importantOverrideOff
     }
     var next
     if (root.draftIsNew) {
@@ -182,11 +224,27 @@ Panel {
     root.activeName = String(parsed.active || "")
     root.seenApps = Array.isArray(parsed.seenApps) ? parsed.seenApps : []
     if (typeof parsed.allowUnknownApps === "boolean") root.allowUnknownApps = parsed.allowUnknownApps
+    if (Array.isArray(parsed.importantApps)) root.importantApps = parsed.importantApps
   }
 
   function setAllowUnknownApps(value) {
     root.allowUnknownApps = value
     run(["setAllowUnknownApps", value ? "true" : "false"])
+  }
+
+  function isImportantApp(app) {
+    var needle = String(app || "").toLowerCase()
+    for (var i = 0; i < root.importantApps.length; i++) {
+      if (String(root.importantApps[i]).toLowerCase() === needle) return true
+    }
+    return false
+  }
+
+  function setImportantApp(app, important) {
+    var next = root.importantApps.filter(function(a) { return a !== app })
+    if (important) next.push(app)
+    root.importantApps = next
+    run(["setImportantApp", app, important ? "true" : "false"])
   }
 
   function forgetSeenApp(app) {
@@ -939,9 +997,10 @@ Panel {
             model: root.seenApps
 
             delegate: Rectangle {
+              id: seenAppRow
               required property var modelData
               width: content.width
-              height: Style.space(36)
+              height: Style.space(64)
               radius: Style.spacing.labelGap
               color: rowHover.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
               // A profile that silences everything has nothing per-app left
@@ -951,12 +1010,14 @@ Panel {
               HoverHandler { id: rowHover }
 
               Text {
+                id: appNameText
                 anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.topMargin: Style.space(6)
                 anchors.leftMargin: Style.space(6)
                 anchors.right: forgetAppBg.left
                 anchors.rightMargin: Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
-                text: modelData
+                text: seenAppRow.modelData
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -973,7 +1034,8 @@ Panel {
                 radius: width / 2
                 anchors.right: appSwitch.left
                 anchors.rightMargin: Style.space(8)
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.top: parent.top
+                anchors.topMargin: Style.space(1)
                 color: forgetAppMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
 
                 Text {
@@ -990,7 +1052,7 @@ Panel {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.forgetSeenApp(modelData)
+                  onClicked: root.forgetSeenApp(seenAppRow.modelData)
                 }
               }
 
@@ -998,11 +1060,112 @@ Panel {
                 id: appSwitch
                 anchors.right: parent.right
                 anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.top: parent.top
                 foreground: root.foreground
                 enabled: !(root.draft && root.draft.dndAll)
-                checked: root.draftMuted(modelData)
-                onToggled: root.setDraftMuted(modelData, !checked)
+                checked: root.draftMuted(seenAppRow.modelData)
+                onToggled: root.setDraftMuted(seenAppRow.modelData, !checked)
+              }
+
+              // Second line: the global "keep this app's toast up" default,
+              // and this profile's own override of it — Inherit reads the
+              // global column to its left, Important/Normal ignore it.
+              Row {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(6)
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Style.space(6)
+                spacing: Style.space(6)
+
+                Rectangle {
+                  id: importantGlobalBg
+                  width: Style.space(84)
+                  height: Style.space(22)
+                  radius: Style.spacing.labelGap
+                  color: importantGlobalMouse.containsMouse
+                    ? Style.hoverFillFor(root.foreground, Color.accent)
+                    : (root.isImportantApp(seenAppRow.modelData) ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                  border.width: root.isImportantApp(seenAppRow.modelData) ? 0 : 1
+                  border.color: Qt.darker(root.foreground, 2.2)
+
+                  Text {
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: "Important"
+                    color: root.isImportantApp(seenAppRow.modelData) ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: importantGlobalMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.setImportantApp(seenAppRow.modelData, !root.isImportantApp(seenAppRow.modelData))
+
+                    PanelToolTip {
+                      visible: importantGlobalMouse.containsMouse
+                      text: "Keep this app's toast on screen by default"
+                      fontFamily: root.fontFamily
+                    }
+                  }
+                }
+
+                // This profile's override of the column to the left —
+                // Inherit/On/Off, same tri-state shape as the profile-wide
+                // allowUnknownApps control above.
+                Row {
+                  width: parent.width - importantGlobalBg.width - Style.space(6)
+                  height: Style.space(22)
+                  spacing: Style.space(4)
+
+                  Repeater {
+                    model: [
+                      { label: "Inherit", value: null },
+                      { label: "On", value: true },
+                      { label: "Off", value: false }
+                    ]
+
+                    delegate: Rectangle {
+                      required property var modelData
+                      readonly property bool isSelected: root.draftImportantOverride(seenAppRow.modelData) === modelData.value
+                      width: (parent.width - Style.space(8)) / 3
+                      height: parent.height
+                      radius: Style.spacing.labelGap
+                      color: overrideMouse.containsMouse
+                        ? Style.hoverFillFor(root.foreground, Color.accent)
+                        : (isSelected ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                      border.width: isSelected ? 0 : 1
+                      border.color: Qt.darker(root.foreground, 2.2)
+
+                      Text {
+                        anchors.centerIn: parent
+                        textFormat: Text.PlainText
+                        text: modelData.label
+                        color: parent.isSelected ? root.foreground : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      MouseArea {
+                        id: overrideMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setDraftImportantOverride(seenAppRow.modelData, modelData.value)
+
+                        PanelToolTip {
+                          visible: overrideMouse.containsMouse
+                          text: "This profile's override — Inherit follows the global switch on the left"
+                          fontFamily: root.fontFamily
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
