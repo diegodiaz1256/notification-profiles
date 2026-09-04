@@ -1797,6 +1797,10 @@ Panel {
                     root.historyRows = root.historyRows.filter(function(r) {
                       return (String(r.timestamp || 0) + "-" + String(r.originalId || 0)) !== stem
                     })
+                    // Clicking is meant to jump to the app, same as a live
+                    // toast click — leaving the panel open over top of it
+                    // defeats that.
+                    root.close()
                   }
 
                   Column {
