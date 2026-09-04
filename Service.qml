@@ -755,7 +755,6 @@ Item {
       }
     } catch (e) {
       // Notification already torn down by the server — fall through to focus.
-      console.warn("invoke default failed:", e)
     }
     // Chat apps (Slack, Discord, Vesktop, etc.) rarely register a "default"
     // libnotify action — they just expect clicking the notification to

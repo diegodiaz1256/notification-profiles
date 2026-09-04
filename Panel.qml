@@ -1781,13 +1781,23 @@ Panel {
                 // app by name is the same fallback invokePopupDefault uses
                 // for chat apps that never registered a "default" action.
                 // Its own row below the header, not overlapping the delete
-                // button above.
+                // button above. Clicking also clears the entry from history,
+                // matching how a live toast click dismisses itself — the
+                // explicit delete button above stays for clearing without
+                // focusing.
                 MouseArea {
                   width: parent.width
                   height: bodyColumn.implicitHeight
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.run(["focusHistoryApp", historyRow.modelData.app || "", historyRow.modelData.body || ""])
+                  onClicked: {
+                    var stem = historyRow.stem
+                    root.run(["focusHistoryApp", historyRow.modelData.app || "", historyRow.modelData.body || ""])
+                    root.run(["removeHistoryEntry", stem])
+                    root.historyRows = root.historyRows.filter(function(r) {
+                      return (String(r.timestamp || 0) + "-" + String(r.originalId || 0)) !== stem
+                    })
+                  }
 
                   Column {
                   id: bodyColumn
