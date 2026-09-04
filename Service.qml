@@ -115,6 +115,24 @@ Item {
     if (important) next.push(app)
     service.importantApps = next
     service.scheduleSettingsSave()
+    resyncImportantForApp(app)
+  }
+
+  // A toast's `important` is resolved once at arrival and carried on the row
+  // (see handleNotification) so it keeps answering to whatever was true when
+  // it arrived — but a change made explicitly while that toast is still on
+  // screen should still take effect on it, rather than only on the next
+  // notification. Re-resolves and re-applies `important` for every live
+  // popup from this app, right now.
+  function resyncImportantForApp(appName) {
+    var app = String(appName || "").trim().toLowerCase()
+    if (!app) return
+    for (var i = 0; i < popupModel.count; i++) {
+      var row = popupModel.get(i)
+      if (String(row.app || "").trim().toLowerCase() !== app) continue
+      popupModel.setProperty(i, "important",
+        NotificationLogic.isAppImportant(service.activeProfile, row.app, service.importantApps))
+    }
   }
 
   readonly property var activeProfile: NotificationLogic.resolveActiveProfile(profiles, activeProfileName)
@@ -310,6 +328,11 @@ Item {
     if (!found) return false
     service.profiles = next
     service.scheduleSettingsSave()
+    // Only matters right now if this is the active profile — a live toast
+    // reads importance from the active profile at resync time same as at
+    // arrival, so an override made in a profile that isn't showing has
+    // nothing on screen to update yet.
+    if (service.activeProfileName === String(profileName || "")) resyncImportantForApp(app)
     return true
   }
 
@@ -742,6 +765,12 @@ Item {
     // old-generation id could fire an unrelated fresh notification's action.
     var ref = entry && !isRestoredRow(entry) ? liveRefs[entry.originalId] : null
     var invoked = false
+    // Confirmed against a real WhatsApp toast click: Brave tears down its
+    // side of the notification (closing this ref) well before a user can
+    // plausibly click it, so `ref` is null in practice for that sender —
+    // there's never a live default action to invoke, only the focus
+    // fallback below. Not fixable here: the sender controls how long it
+    // keeps listening, not us.
     try {
       if (ref && ref.actions) {
         for (var i = 0; i < ref.actions.length; i++) {
