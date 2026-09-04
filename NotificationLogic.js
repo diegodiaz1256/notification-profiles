@@ -240,20 +240,63 @@ function effectiveAppName(appName, desktopEntry) {
   return entry
 }
 
+// Confirmed against a real notification: Brave sets neither a distinguishing
+// app_name ("brave-origin" for every window it owns) nor a useful
+// desktop-entry hint for a --app=<url> webapp, so effectiveAppName's hint
+// path never resolves WhatsApp. The one thing Brave DOES put in the body is
+// the sending page's own URL (see bodyLinkUrl) — its host is a reliable,
+// site-specific identity when the app_name is a generic browser name. Small
+// map of known webapp hosts to a friendly name + themed icon name (the same
+// Icon= the omarchy-launch-webapp .desktop entry uses, resolved the same way
+// NotificationCard.iconSource() resolves any other themed icon name) so the
+// icon slot isn't stuck showing the browser's own logo. Extend as more sites
+// come up; a host not listed here just keeps the browser's own name/icon.
+var KNOWN_WEBAPP_HOSTS = {
+  "web.whatsapp.com": { name: "WhatsApp", icon: "whatsapp" }
+}
+
+var GENERIC_BROWSER_APP_NAMES = {
+  "brave": true,
+  "brave-origin": true,
+  "brave browser": true,
+  "chromium": true,
+  "google-chrome": true,
+  "chrome": true
+}
+
+function webappOverride(appName, body) {
+  var app = String(appName || "").trim().toLowerCase()
+  if (!GENERIC_BROWSER_APP_NAMES[app]) return null
+  var host = urlHost(bodyLinkUrl(body))
+  if (!host) return null
+  return KNOWN_WEBAPP_HOSTS[host] || null
+}
+
 function snapshotOf(notification, timestamp) {
   var n = notification || {}
   var id = n.id || 0
   var expireTimeout = Number(n.expireTimeout || 0)
   if (!isFinite(expireTimeout) || expireTimeout < 0) expireTimeout = 0
+  var app = effectiveAppName(n.appName, n.desktopEntry)
+  var glyph = glyphFromHints(n.hints)
+  var appIcon = n.appIcon || ""
+  var override = webappOverride(app, n.body)
+  if (override) {
+    app = override.name
+    // The image role (avatar, etc.) still wins in the card — this only
+    // replaces the small app-identity icon, which for a webapp is just the
+    // browser's own logo and never the site's.
+    appIcon = override.icon
+  }
   return {
     id: id,
     originalId: id,
-    app: effectiveAppName(n.appName, n.desktopEntry),
-    appIcon: n.appIcon || "",
+    app: app,
+    appIcon: appIcon,
     summary: String(n.summary || ""),
     body: n.body || "",
     image: n.image || "",
-    glyph: glyphFromHints(n.hints),
+    glyph: glyph,
     execArgv: execArgvFromHints(n.hints),
     urgency: n.urgency,
     expireTimeout: expireTimeout,
