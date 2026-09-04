@@ -1794,13 +1794,17 @@ Panel {
                     var stem = historyRow.stem
                     root.run(["focusHistoryApp", historyRow.modelData.app || "", historyRow.modelData.body || ""])
                     root.run(["removeHistoryEntry", stem])
+                    // Clicking is meant to jump to the app, same as a live
+                    // toast click — leaving the panel open over top of it
+                    // defeats that. Close BEFORE reassigning historyRows:
+                    // that reassignment destroys this Repeater delegate
+                    // (including the "root" id lookup this onClicked runs
+                    // under), so anything after it silently throws
+                    // ReferenceError and never runs.
+                    root.close()
                     root.historyRows = root.historyRows.filter(function(r) {
                       return (String(r.timestamp || 0) + "-" + String(r.originalId || 0)) !== stem
                     })
-                    // Clicking is meant to jump to the app, same as a live
-                    // toast click — leaving the panel open over top of it
-                    // defeats that.
-                    root.close()
                   }
 
                   Column {
