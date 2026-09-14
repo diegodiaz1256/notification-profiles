@@ -986,8 +986,15 @@ Item {
   // job: the names sort numerically by their leading millisecond timestamp,
   // so everything but the newest historyLimit files is the tail to drop,
   // image copies included. Callers set $hist, $limit and $imgs first.
+  //
+  // Both fields are sorted numerically, split on "-". A plain `sort -n` reads
+  // only the leading timestamp and falls back to a lexical comparison for the
+  // rest of the name, which orders "<ts>-10" BEFORE "<ts>-3". A burst landing
+  // in one millisecond (ids are a per-process counter, and a chatty sender or
+  // a replay easily fills several files per tick) therefore had its newest
+  // entry treated as the oldest and deleted, while an older one survived.
   readonly property string trimHistoryScript:
-    "ls -1 \"$hist\" 2>/dev/null | sort -n | head -n \"-$limit\" | while IFS= read -r stale; do rm -f \"$hist/$stale\" \"$imgs/${stale%.json}\"-*; done"
+    "ls -1 \"$hist\" 2>/dev/null | sort -t- -k1,1n -k2,2n | head -n \"-$limit\" | while IFS= read -r stale; do rm -f \"$hist/$stale\" \"$imgs/${stale%.json}\"-*; done"
 
   function archivePopupFileFor(row) {
     if (!row) return
