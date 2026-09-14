@@ -719,12 +719,26 @@ Item {
     // id would dismiss that unrelated notification at the server.
     var restored = isRestoredRow(entry)
     var ref = !restored && originalId >= 0 ? liveRefs[originalId] : null
-    // The popup is leaving the screen — for any reason — so its file must not
-    // survive to the next shell restart. It becomes the newest history entry
-    // instead. Rows that never had a file (a history replay, the empty-history
-    // placeholder) archive to nothing, which the move tolerates.
+    // The popup is leaving the screen, so its file must not survive to the
+    // next shell restart either way. What differs is WHERE it goes.
+    //
+    // A notification the user never acted on (it expired on its own) is
+    // exactly what history is for: they may not have seen it at all. One the
+    // user dismissed or clicked has already been dealt with, so keeping it
+    // would make history a log of things already handled rather than a list
+    // of what was missed, and every dismissal would need a second cleanup in
+    // the panel to undo.
+    //
+    // An important app is the exception: its toast is the one the user asked
+    // to keep on screen, so the record survives being acted on (see
+    // isAppImportant / the `important` role resolved at arrival).
+    //
+    // Rows that never had a file (a history replay, the empty-history
+    // placeholder) archive or delete to nothing, which both paths tolerate.
     if (entry) {
-      archivePopupFileFor(entry)
+      var handled = reason === "dismiss" || reason === "invoke"
+      if (handled && !entry.important) deletePopupFileFor(entry)
+      else archivePopupFileFor(entry)
       if (restored) delete restoredPopups[NotificationLogic.popupFileName(entry)]
     }
     popupModel.remove(index)
@@ -758,7 +772,7 @@ Item {
     var argv = NotificationLogic.parseExecArgv(entry ? entry.execArgv : "")
     if (argv) {
       Util.execArgv(argv)
-      dismissPopup(index)
+      removePopup(index, "invoke")
       return
     }
     // Restored rows have no live actions, and looking up liveRefs by their
@@ -790,7 +804,7 @@ Item {
     // focus their window. Fall back to focusing the sending app by class so
     // that click-to-jump actually works.
     if (!invoked) focusApp(entry)
-    dismissPopup(index)
+    removePopup(index, "invoke")
   }
 
   // Try to focus an existing Hyprland window matching the notification's
