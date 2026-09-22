@@ -1667,7 +1667,19 @@ Panel {
 
                     Image {
                       id: appIconImage
-                      readonly property string src: root.iconSource(historyRow.modelData.appIcon)
+                      // Same precedence as the live toast (see
+                      // NotificationCard.smallIconSource): the per-notification
+                      // image role is the avatar/media the sender attached and
+                      // is what identifies the message, so it wins; appIcon is
+                      // the app-identity fallback. Reading appIcon alone left
+                      // every WhatsApp entry blank, since a webapp notification
+                      // carries its contact photo in `image` and nothing in
+                      // `appIcon`. Both roles are persisted (see
+                      // PERSISTED_IMAGE_ROLES), so an archived row still
+                      // resolves either one.
+                      readonly property string src: String(historyRow.modelData.image || "").length > 0
+                        ? root.iconSource(historyRow.modelData.image)
+                        : root.iconSource(historyRow.modelData.appIcon)
                       visible: src !== "" && status === Image.Ready
                       source: src
                       anchors.fill: parent
