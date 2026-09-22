@@ -607,6 +607,10 @@ Item {
         service.writeSilenced(notification, updated)
         return
       }
+      // A silenced notification never becomes a popup, so removePopup never
+      // sees it. Archive it here instead, once its content has settled --
+      // "what did I miss while muted" is exactly what the archive is for.
+      service.archiveEntry(written)
       service.releaseSilenced(notification, written.originalId)
     })
   }
@@ -750,6 +754,11 @@ Item {
       var handled = !restored && (reason === "dismiss" || reason === "invoke")
       if (handled && !entry.important) deletePopupFileFor(entry)
       else archivePopupFileFor(entry)
+      // Archived for every reason, including the dismiss/click above that
+      // deliberately keeps nothing in the ten-entry history: "I dealt with
+      // that toast" is not the same as "I never want to find it again", and
+      // the archive is where the second question gets answered.
+      if (!restored) archiveEntry(entry)
       if (restored) delete restoredPopups[NotificationLogic.popupFileName(entry)]
     }
     popupModel.remove(index)
@@ -995,6 +1004,47 @@ Item {
     enqueuePopupFileJob(command)
   }
 
+  // ------------------------------------------------- long-term archive
+  //
+  // The history directory above is capped at historyLimit because it exists
+  // to be replayed as toasts. The archive is the other half: a SQLite
+  // database holding every notification for thirty days, searchable, with
+  // its own pinning/notes/groups. It is written by a helper script rather
+  // than from QML, since Quickshell has no SQLite binding and the panel that
+  // reads it needs full-text search.
+  //
+  // Failure here is deliberately silent and non-blocking: the archive is a
+  // convenience, and a missing python3 or a locked database must never stop
+  // a notification being shown or its history file being written.
+  readonly property string archiveHelper:
+    home + "/.config/omarchy/plugins/zeroge.notification-archive/bin/notification-archive"
+
+  // Rows that came back from a history replay are already in the archive --
+  // they were archived when they first arrived -- so re-ingesting one on
+  // dismissal would only rewrite the row it already has. Harmless, but the
+  // check is one comparison and keeps the queue shorter.
+  function archiveEntry(row) {
+    if (!row || !row.timestamp) return
+    var payload = JSON.stringify({
+      timestamp: row.timestamp,
+      originalId: row.originalId,
+      app: row.app || "",
+      // The icon as it arrived, NOT the rewritten copy path persistablePopup
+      // produces: those copies are deleted when the ten-entry history trims,
+      // so the archive stores the themed name or original path instead.
+      appIcon: row.appIcon || "",
+      summary: row.summary || "",
+      body: row.body || "",
+      urgency: row.urgency,
+      silenced: !!row.silenced,
+      important: !!row.important
+    })
+    enqueuePopupFileJob(["bash", "-c",
+      "[ -x \"$1\" ] || exit 0\n" +
+      "printf '%s' \"$2\" | \"$1\" ingest >/dev/null 2>&1 || true",
+      "--", archiveHelper, payload])
+  }
+
   function deletePopupFileFor(row) {
     if (!row) return
     // History replays and the "no recent notifications" placeholder never
@@ -1228,6 +1278,10 @@ Item {
         // It would have expired on screen had the shell kept running, so it
         // gets archived exactly like an expiry that happened while it did.
         archivePopupFileFor(entry)
+        // Same reasoning for the long-term archive: this notification was
+        // received, and the shell being down when its time ran out should not
+        // be what decides whether it is searchable later.
+        archiveEntry(entry)
         continue
       }
       // Survivors restart with a full lifetime on purpose: shell restarts
