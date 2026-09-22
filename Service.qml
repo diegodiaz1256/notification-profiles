@@ -571,6 +571,16 @@ Item {
       return
     }
 
+    // Archived on arrival, not on removal. A notification has been received
+    // the moment it gets here; whether it is still on screen is a display
+    // detail. Waiting for it to leave meant anything currently showing was
+    // missing from the archive, and a toast kept up by an important-app rule
+    // never left at all, so it was never recorded.
+    //
+    // Ingest is INSERT ... ON CONFLICT on the entry's own identity, so the
+    // later write when it does leave updates this row rather than adding a
+    // second one.
+    archiveEntry(snapshot)
     persistPopupFile(snapshot)
     watchForUpdates(notification, snapshot)
     // Qt.callLater avoids "QV4::Object::insertMember" crashes when a

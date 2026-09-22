@@ -403,6 +403,86 @@ Panel {
   // a file URL, and anything else (a bare name like "brave-browser") is
   // looked up as a themed icon. History rows persist appIcon as this same
   // string, so it resolves exactly the same way once archived.
+  // ------------------------------------------------------------ avatars
+  //
+  // A sender can deliver its image as raw pixels in the `image-data` hint
+  // instead of a file path, and those pixels never reach disk: Quickshell
+  // turns them into an in-process URL that renders on the live toast and dies
+  // with the notification, so an archived row has nothing to show but the app
+  // icon. Brave does this for WhatsApp, which is why a contact photo appears
+  // on screen and is a generic logo in history a moment later.
+  //
+  // zeroge.notification-archive ships a daemon that captures those pixels off
+  // the bus and writes them here. It watches the Notify method call, where no
+  // notification id exists yet (the id comes back in the reply), so it names
+  // files after the sending app and a hash of the summary. This recomputes
+  // that name; if the daemon is not installed the directory is simply empty
+  // and everything falls back to the app icon as before.
+
+  readonly property string avatarDir:
+    Quickshell.env("HOME") + "/.local/state/omarchy/notifications/avatars/"
+
+  // FNV-1a, 64-bit, matching the daemon's own implementation. Kept as two
+  // 32-bit halves because a JavaScript number cannot hold 64 bits exactly and
+  // a rounded hash names a file that does not exist.
+  function avatarHash(text) {
+    var hi = 0xcbf29ce4 >>> 0
+    var lo = 0x84222325 >>> 0
+    var bytes = root.utf8Bytes(String(text || ""))
+    for (var i = 0; i < bytes.length; i++) {
+      lo = (lo ^ bytes[i]) >>> 0
+      var l0 = lo & 0xffff, l1 = lo >>> 16, h0 = hi & 0xffff, h1 = hi >>> 16
+      var p0 = l0 * 0x01b3
+      var p1 = l1 * 0x01b3 + (p0 >>> 16)
+      var p2 = h0 * 0x01b3 + (p1 >>> 16)
+      var p3 = h1 * 0x01b3 + (p2 >>> 16)
+      var nlo = (((p1 & 0xffff) << 16) | (p0 & 0xffff)) >>> 0
+      var nhi = (((p3 & 0xffff) << 16) | (p2 & 0xffff)) >>> 0
+      nhi = (nhi + lo * 0x100) >>> 0
+      lo = nlo
+      hi = nhi
+    }
+    function hex8(value) {
+      var out = (value >>> 0).toString(16)
+      while (out.length < 8) out = "0" + out
+      return out
+    }
+    return hex8(hi) + hex8(lo)
+  }
+
+  // The daemon hashes UTF-8 bytes, so an accented name has to be encoded the
+  // same way rather than hashed as UTF-16 code units.
+  function utf8Bytes(text) {
+    var out = []
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i)
+      if (code < 0x80) {
+        out.push(code)
+      } else if (code < 0x800) {
+        out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f))
+      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+        var low = text.charCodeAt(i + 1)
+        var point = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00)
+        out.push(0xf0 | (point >> 18), 0x80 | ((point >> 12) & 0x3f),
+                 0x80 | ((point >> 6) & 0x3f), 0x80 | (point & 0x3f))
+        i++
+      } else {
+        out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f),
+                 0x80 | (code & 0x3f))
+      }
+    }
+    return out
+  }
+
+  // Keyed on the summary alone, matching the daemon. The shell rewrites a
+  // Chromium webapp's identity ("Brave Origin" becomes "WhatsApp"), so the app
+  // name differs between what the daemon sees on the bus and what is stored
+  // here; the summary is the field both sides agree on.
+  function avatarPath(app, summary) {
+    return root.avatarDir + "avatar-" + root.avatarHash(summary) + ".png"
+  }
+
+
   function iconSource(icon) {
     var value = String(icon || "")
     if (value.length === 0) return ""
@@ -1691,6 +1771,9 @@ Panel {
               id: historyRow
               required property var modelData
               readonly property string stem: String(modelData.timestamp || 0) + "-" + String(modelData.originalId || 0)
+              // Set by the FileView below once it knows whether this sender
+              // has a captured avatar on disk.
+              property bool avatarExists: false
               width: content.width
               implicitHeight: cardBody.implicitHeight + topPadding + bottomPadding
               radius: Style.cornerRadius
@@ -1711,13 +1794,43 @@ Panel {
 
                   Rectangle {
                     id: appIconBg
-                    visible: appIconImage.visible
+                    visible: appIconImage.visible || historyAvatar.status === Image.Ready
                     width: Style.space(22)
                     height: Style.space(22)
-                    radius: Style.spacing.labelGap
+                    // Round for a captured contact photo, square-ish for an
+                    // app logo.
+                    radius: historyAvatar.status === Image.Ready
+                      ? width / 2
+                      : Style.spacing.labelGap
+                    clip: true
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.normalFillFor(root.foreground, Color.accent)
+
+                    // Checked before the Image is given a path: most senders
+                    // attach no pixels, and letting an Image probe a missing
+                    // file logs a Qt warning for every ordinary row.
+                    FileView {
+                      path: root.avatarPath(historyRow.modelData.app, historyRow.modelData.summary)
+                      blockLoading: false
+                      printErrors: false
+                      onLoaded: historyRow.avatarExists = true
+                      onLoadFailed: historyRow.avatarExists = false
+                    }
+
+                    // The sender's own photo, captured by the archive plugin's
+                    // avatar daemon. It identifies the contact rather than the
+                    // app, so it covers the app icon when present.
+                    Image {
+                      id: historyAvatar
+                      anchors.fill: parent
+                      z: 1
+                      source: historyRow.avatarExists
+                        ? root.avatarPath(historyRow.modelData.app, historyRow.modelData.summary)
+                        : ""
+                      fillMode: Image.PreserveAspectCrop
+                      asynchronous: true
+                    }
 
                     Image {
                       id: appIconImage
@@ -1734,7 +1847,10 @@ Panel {
                       readonly property string src: String(historyRow.modelData.image || "").length > 0
                         ? root.iconSource(historyRow.modelData.image)
                         : root.iconSource(historyRow.modelData.appIcon)
+                      // Hidden when a captured avatar covers it, so the two
+                      // never stack.
                       visible: src !== "" && status === Image.Ready
+                        && historyAvatar.status !== Image.Ready
                       source: src
                       anchors.fill: parent
                       anchors.margins: Style.space(3)
