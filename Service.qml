@@ -742,7 +742,12 @@ Item {
     // Rows that never had a file (a history replay, the empty-history
     // placeholder) archive or delete to nothing, which both paths tolerate.
     if (entry) {
-      var handled = reason === "dismiss" || reason === "invoke"
+      // A restored/replayed row is NOT backed by a file in popupStateDir:
+      // its file already sits in historyDir, and it shares an image stem with
+      // that archived entry. Deleting by stem here would take the image out
+      // from under a history entry that is staying put, so these rows keep
+      // the old behaviour (the archive mv simply fails and changes nothing).
+      var handled = !restored && (reason === "dismiss" || reason === "invoke")
       if (handled && !entry.important) deletePopupFileFor(entry)
       else archivePopupFileFor(entry)
       if (restored) delete restoredPopups[NotificationLogic.popupFileName(entry)]
