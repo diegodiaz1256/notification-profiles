@@ -348,7 +348,13 @@ Item {
   // A real notification always clears the bit: once the app has genuinely
   // notified, it ages out on the normal schedule like everything else.
   readonly property int seenAppsLimit: 200
-  readonly property int seenAppsMaxAgeMs: 30 * 24 * 60 * 60 * 1000
+  // `real`, not `int`: QML's int is 32-bit signed, and 30 days in
+  // milliseconds (2592000000) is past its 2147483647 ceiling, so it wrapped
+  // to -1702967296. pruneSeenApps then computed `Date.now() - maxAge` as
+  // Date.now() PLUS 1.7e9, putting the cutoff about 20 days in the future,
+  // so every entry counted as older than it and the whole list was pruned on
+  // every startup. That is why no app ever survived a restart.
+  readonly property real seenAppsMaxAgeMs: 30 * 24 * 60 * 60 * 1000
   function recordSeenApp(appName, manual) {
     var app = String(appName || "").trim()
     if (!app) return
