@@ -358,6 +358,14 @@ Panel {
 
   readonly property string historyDir: Quickshell.env("HOME") + "/.local/state/omarchy/notifications/history/"
 
+  // Opening the archive is a summon like any other; the archive panel owns
+  // its own window, so nothing here needs to know how it is drawn.
+  Process {
+    id: openArchiveProc
+    command: ["omarchy-shell", "shell", "summon", "zeroge.notification-archive"]
+    running: false
+  }
+
   Process {
     id: historyProc
     command: ["bash", "-c", "awk 1 \"$1\"/*.json 2>/dev/null || true", "--", root.historyDir]
@@ -1605,6 +1613,52 @@ Panel {
               text: "󰃢"
               visible: root.historyRows.length > 0
               onPressed: function(b) { root.run(["clear"]); root.historyRows = [] }
+            }
+
+            // This list is whatever is still in the ten-entry history
+            // directory, which is all it can ever show. Everything older
+            // lives in the archive, and without a way through to it from
+            // here the only route is knowing the menu entry exists.
+            Rectangle {
+              id: openArchiveButton
+              width: openArchiveLabel.implicitWidth + Style.space(16)
+              height: Style.space(24)
+              anchors.right: clearButton.left
+              anchors.rightMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.spacing.labelGap
+              color: openArchiveMouse.containsMouse
+                ? Style.hoverFillFor(root.foreground, Color.accent)
+                : "transparent"
+              border.width: 1
+              border.color: Qt.darker(root.foreground, 2.2)
+
+              Text {
+                id: openArchiveLabel
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "󰂺 All 30 days"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                id: openArchiveMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  openArchiveProc.running = true
+                  root.close()
+                }
+
+                PanelToolTip {
+                  visible: openArchiveMouse.containsMouse
+                  text: "Search every notification from the last 30 days"
+                  fontFamily: root.fontFamily
+                }
+              }
             }
           }
 
