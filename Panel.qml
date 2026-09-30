@@ -478,6 +478,22 @@ Panel {
   // Chromium webapp's identity ("Brave Origin" becomes "WhatsApp"), so the app
   // name differs between what the daemon sees on the bus and what is stored
   // here; the summary is the field both sides agree on.
+  // History rows show the body as stored, and Chromium-family senders lead it
+  // with the sending page's own URL as a link tag. Left to AutoText that tag
+  // rendered as a live blue link, and any other markup in an
+  // attacker-controlled body would render too, <img> included. Tags are
+  // stripped and the result shown as plain text.
+  function displayBody(body) {
+    var text = String(body || "")
+    text = text.replace(/^\s*<a\b[^>]*>\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^<\s]*)?\s*<\/a>\s*/i, "")
+    text = text.replace(/^\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?\s+/i, "")
+    text = text.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]*>/g, "")
+    text = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+               .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+               .replace(/&amp;/g, "&")
+    return text.replace(/^\s+|\s+$/g, "")
+  }
+
   function avatarPath(app, summary) {
     return root.avatarDir + "avatar-" + root.avatarHash(summary) + ".png"
   }
@@ -1794,7 +1810,13 @@ Panel {
 
                   Rectangle {
                     id: appIconBg
-                    visible: appIconImage.visible || historyAvatar.status === Image.Ready
+                    // Bound to load status, not to the children's `visible`:
+                    // a child's visible already depends on this one, so
+                    // reading it back here was a binding loop. Images load
+                    // whether or not they are shown, so status is available
+                    // even while this container is hidden.
+                    visible: historyAvatar.status === Image.Ready
+                      || (appIconImage.src !== "" && appIconImage.status === Image.Ready)
                     width: Style.space(22)
                     height: Style.space(22)
                     // Round for a captured contact photo, square-ish for an
@@ -1862,8 +1884,8 @@ Panel {
                   Text {
                     id: appText
                     textFormat: Text.PlainText
-                    anchors.left: appIconImage.visible ? appIconBg.right : parent.left
-                    anchors.leftMargin: appIconImage.visible ? Style.space(8) : 0
+                    anchors.left: appIconBg.visible ? appIconBg.right : parent.left
+                    anchors.leftMargin: appIconBg.visible ? Style.space(8) : 0
                     anchors.right: silencedBadge.visible ? silencedBadge.left : timeText.left
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
@@ -1996,6 +2018,9 @@ Panel {
 
                   Text {
                     width: parent.width
+                    // The spec defines the summary as plain text, so AutoText
+                    // could only ever promote a hostile string to markup.
+                    textFormat: Text.PlainText
                     visible: (historyRow.modelData.summary || "") !== ""
                     text: historyRow.modelData.summary || ""
                     color: root.foreground
@@ -2006,8 +2031,9 @@ Panel {
 
                   Text {
                     width: parent.width
-                    visible: (historyRow.modelData.body || "") !== ""
-                    text: historyRow.modelData.body || ""
+                    textFormat: Text.PlainText
+                    visible: root.displayBody(historyRow.modelData.body) !== ""
+                    text: root.displayBody(historyRow.modelData.body)
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
